@@ -1,8 +1,14 @@
 use crate::flea_connector::{FleaConnector, FleaConnectorError};
 use crate::serial_terminal::{FleaTerminal, FleaTerminalError};
-use crate::trigger_config::{AnalogTrigger, DigitalTrigger};
+use crate::trigger_config::{AnalogTrigger, DigitalTrigger, Trigger};
 use polars::prelude::*;
 use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeType {
+    X1,
+    X10,
+}
 
 #[derive(Debug, Clone)]
 pub enum Waveform {
@@ -78,11 +84,11 @@ pub enum FleaScopeError {
 }
 
 pub struct FleaScope {
-    pub serial: FleaTerminal,
-    pub ver: String,
-    pub hostname: String,
-    pub x1: FleaProbe,
-    pub x10: FleaProbe,
+    serial: FleaTerminal,
+    _ver: String,
+    hostname: String,
+    x1: FleaProbe,
+    x10: FleaProbe,
 }
 
 impl FleaScope {
@@ -122,7 +128,7 @@ impl FleaScope {
 
         let mut scope = Self {
             serial,
-            ver,
+            _ver: ver,
             hostname,
             x1,
             x10,
@@ -136,21 +142,30 @@ impl FleaScope {
         Ok(scope)
     }
 
-    /// Read data with the 1x probe
-    pub fn read_x1(
+    /// Read data with unified trigger (supports both analog and digital triggers)
+    pub fn read(
         &mut self,
+        probe: ProbeType,
         time_frame: Duration,
-        trigger: Option<AnalogTrigger>,
+        trigger: Option<Trigger>,
         delay: Option<Duration>,
     ) -> Result<DataFrame, FleaScopeError> {
         let trigger_fields = if let Some(trigger) = trigger {
-            trigger
-                .into_trigger_fields(|v| self.x1.voltage_to_raw(v).unwrap_or(0.0))
-                .map_err(|_| FleaScopeError::CalibrationNotSet)?
+            match trigger {
+                Trigger::Analog(analog_trigger) => {
+                    let probe_ref = self.get_probe(probe);
+                    analog_trigger
+                        .into_trigger_fields(|v| probe_ref.voltage_to_raw(v).unwrap())
+                        .map_err(|_| FleaScopeError::CalibrationNotSet)?
+                }
+                Trigger::Digital(digital_trigger) => digital_trigger.into_trigger_fields(),
+            }
         } else {
+            // Default to analog auto trigger at 0V
+            let probe_ref = self.get_probe(probe);
             AnalogTrigger::start_capturing_when()
                 .auto(0.0)
-                .into_trigger_fields(|v| self.x1.voltage_to_raw(v).unwrap_or(0.0))
+                .into_trigger_fields(|v| probe_ref.voltage_to_raw(v).unwrap())
                 .map_err(|_| FleaScopeError::CalibrationNotSet)?
         };
 
@@ -158,10 +173,11 @@ impl FleaScope {
 
         // Convert BNC values from raw to voltage
         let bnc_column = df.column("bnc")?;
+        let probe_ref = self.get_probe(probe);
         let voltage_values: Result<Vec<Option<f64>>, _> = bnc_column
             .f64()?
             .into_iter()
-            .map(|opt_val| opt_val.map(|v| self.x1.raw_to_voltage(v)).transpose())
+            .map(|opt_val| opt_val.map(|v| probe_ref.raw_to_voltage(v)).transpose())
             .collect();
 
         let voltage_series = Series::new("bnc".into(), voltage_values?);
@@ -169,98 +185,6 @@ impl FleaScope {
         Ok(df)
     }
 
-    /// Read data with the 10x probe
-    pub fn read_x10(
-        &mut self,
-        time_frame: Duration,
-        trigger: Option<AnalogTrigger>,
-        delay: Option<Duration>,
-    ) -> Result<DataFrame, FleaScopeError> {
-        let trigger_fields = if let Some(trigger) = trigger {
-            trigger
-                .into_trigger_fields(|v| self.x10.voltage_to_raw(v).unwrap_or(0.0))
-                .map_err(|_| FleaScopeError::CalibrationNotSet)?
-        } else {
-            AnalogTrigger::start_capturing_when()
-                .auto(0.0)
-                .into_trigger_fields(|v| self.x10.voltage_to_raw(v).unwrap_or(0.0))
-                .map_err(|_| FleaScopeError::CalibrationNotSet)?
-        };
-
-        let mut df = self.raw_read(time_frame, &trigger_fields, delay)?;
-
-        // Convert BNC values from raw to voltage
-        let bnc_column = df.column("bnc")?;
-        let voltage_values: Result<Vec<Option<f64>>, _> = bnc_column
-            .f64()?
-            .into_iter()
-            .map(|opt_val| opt_val.map(|v| self.x10.raw_to_voltage(v)).transpose())
-            .collect();
-
-        let voltage_series = Series::new("bnc".into(), voltage_values?);
-        let _ = df.replace("bnc", voltage_series)?;
-        Ok(df)
-    }
-
-    /// Read data with the 1x probe using a digital trigger
-    pub fn read_x1_digital(
-        &mut self,
-        time_frame: Duration,
-        trigger: Option<DigitalTrigger>,
-        delay: Option<Duration>,
-    ) -> Result<DataFrame, FleaScopeError> {
-        let trigger_fields = if let Some(trigger) = trigger {
-            trigger.into_trigger_fields()
-        } else {
-            DigitalTrigger::start_capturing_when()
-                .is_matching()
-                .into_trigger_fields()
-        };
-
-        let mut df = self.raw_read(time_frame, &trigger_fields, delay)?;
-
-        // Convert BNC values from raw to voltage
-        let bnc_column = df.column("bnc")?;
-        let voltage_values: Result<Vec<Option<f64>>, _> = bnc_column
-            .f64()?
-            .into_iter()
-            .map(|opt_val| opt_val.map(|v| self.x1.raw_to_voltage(v)).transpose())
-            .collect();
-
-        let voltage_series = Series::new("bnc".into(), voltage_values?);
-        let _ = df.replace("bnc", voltage_series)?;
-        Ok(df)
-    }
-
-    /// Read data with the 10x probe using a digital trigger
-    pub fn read_x10_digital(
-        &mut self,
-        time_frame: Duration,
-        trigger: Option<DigitalTrigger>,
-        delay: Option<Duration>,
-    ) -> Result<DataFrame, FleaScopeError> {
-        let trigger_fields = if let Some(trigger) = trigger {
-            trigger.into_trigger_fields()
-        } else {
-            DigitalTrigger::start_capturing_when()
-                .is_matching()
-                .into_trigger_fields()
-        };
-
-        let mut df = self.raw_read(time_frame, &trigger_fields, delay)?;
-
-        // Convert BNC values from raw to voltage
-        let bnc_column = df.column("bnc")?;
-        let voltage_values: Result<Vec<Option<f64>>, _> = bnc_column
-            .f64()?
-            .into_iter()
-            .map(|opt_val| opt_val.map(|v| self.x10.raw_to_voltage(v)).transpose())
-            .collect();
-
-        let voltage_series = Series::new("bnc".into(), voltage_values?);
-        let _ = df.replace("bnc", voltage_series)?;
-        Ok(df)
-    }
 
     /// Set the waveform generator
     pub fn set_waveform(&mut self, waveform: Waveform, hz: i32) -> Result<(), FleaScopeError> {
@@ -444,16 +368,19 @@ impl FleaScope {
         Ok(())
     }
 
-    /// Calibrate the 1x probe for 0V
-    pub fn calibrate_x1_zero(&mut self) -> Result<f64, FleaScopeError> {
+    /// Calibrate probe for 0V
+    pub fn calibrate_zero(&mut self, probe: ProbeType) -> Result<f64, FleaScopeError> {
         // Try to preserve existing 3.3V calibration if available
-        let raw_value_3v3 = if let (Some(cal_zero), Some(cal_3v3)) = self.x1.calibration() {
-            Some(self.x1.voltage_to_raw(3.3).unwrap_or(cal_3v3 + cal_zero))
-        } else {
-            None
+        let raw_value_3v3 = {
+            let probe_ref = self.get_probe(probe);
+            if let (Some(_cal_zero), Some(_cal_3v3)) = probe_ref.calibration() {
+                Some(probe_ref.voltage_to_raw(3.3).unwrap())
+            } else {
+                None
+            }
         };
 
-        // Read stable value for calibration - inlined to avoid borrowing issues
+        // Read stable value for calibration
         let trigger_fields = DigitalTrigger::start_capturing_when()
             .is_matching()
             .into_trigger_fields();
@@ -477,20 +404,24 @@ impl FleaScope {
         }
 
         let cal_zero = bnc_values.iter().sum::<f64>() / bnc_values.len() as f64;
-        self.x1.cal_zero = Some(cal_zero);
+        let probe_mut = self.get_probe_mut(probe);
+        probe_mut.cal_zero = Some(cal_zero);
 
         if let Some(raw_3v3) = raw_value_3v3 {
-            self.x1.cal_3v3 = Some(raw_3v3 - cal_zero);
+            probe_mut.cal_3v3 = Some(raw_3v3 - cal_zero);
         }
 
         Ok(cal_zero)
     }
 
-    /// Calibrate the 1x probe for 3.3V
-    pub fn calibrate_x1_3v3(&mut self) -> Result<f64, FleaScopeError> {
-        let cal_zero = self.x1.cal_zero.ok_or(FleaScopeError::ZeroCalibrationRequired)?;
+    /// Calibrate probe for 3.3V
+    pub fn calibrate_3v3(&mut self, probe: ProbeType) -> Result<f64, FleaScopeError> {
+        let cal_zero = {
+            let probe_ref = self.get_probe(probe);
+            probe_ref.cal_zero.ok_or(FleaScopeError::ZeroCalibrationRequired)?
+        };
         
-        // Read stable value for calibration - inlined to avoid borrowing issues
+        // Read stable value for calibration
         let trigger_fields = DigitalTrigger::start_capturing_when()
             .is_matching()
             .into_trigger_fields();
@@ -515,93 +446,53 @@ impl FleaScope {
 
         let raw_3v3 = bnc_values.iter().sum::<f64>() / bnc_values.len() as f64;
         let cal_3v3 = raw_3v3 - cal_zero;
-        self.x1.cal_3v3 = Some(cal_3v3);
+        let probe_mut = self.get_probe_mut(probe);
+        probe_mut.cal_3v3 = Some(cal_3v3);
         Ok(cal_3v3)
     }
 
-    /// Calibrate the 10x probe for 0V
-    pub fn calibrate_x10_zero(&mut self) -> Result<f64, FleaScopeError> {
-        // Try to preserve existing 3.3V calibration if available
-        let raw_value_3v3 = if let (Some(cal_zero), Some(cal_3v3)) = self.x10.calibration() {
-            Some(self.x10.voltage_to_raw(3.3).unwrap_or(cal_3v3 + cal_zero))
-        } else {
-            None
+    /// Write probe calibration to flash
+    pub fn write_calibration_to_flash(&mut self, probe: ProbeType) -> Result<(), FleaScopeError> {
+        // Get calibration values first
+        let (cal_zero, cal_3v3, multiplier) = {
+            let probe_ref = self.get_probe(probe);
+            (
+                probe_ref.cal_zero.ok_or(FleaScopeError::CalibrationNotSet)?,
+                probe_ref.cal_3v3.ok_or(FleaScopeError::CalibrationNotSet)?,
+                probe_ref.multiplier,
+            )
         };
 
-        // Read stable value for calibration - inlined to avoid borrowing issues
-        let trigger_fields = DigitalTrigger::start_capturing_when()
-            .is_matching()
-            .into_trigger_fields();
+        // Now write to flash
+        let zero_value = (cal_zero - 2048.0 + 1000.0 + 0.5) as i32;
+        let v3v3_value = (cal_3v3 * multiplier as f64 + 1000.0 + 0.5) as i32;
 
-        let data = self.raw_read(Duration::from_millis(20), &trigger_fields, None)?;
-        let bnc_series = data.column("bnc")?;
-        let bnc_values: Vec<f64> = bnc_series.f64()?.into_no_null_iter().collect();
-        
-        if bnc_values.is_empty() {
-            return Err(FleaScopeError::DataParsing("No data received".to_string()));
-        }
+        self.serial.exec(
+            &format!("cal_zero_x{} = {}", multiplier, zero_value),
+            None,
+        )?;
+        self.serial.exec(
+            &format!("cal_3v3_x{} = {}", multiplier, v3v3_value),
+            None,
+        )?;
 
-        let min_val = bnc_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max_val = bnc_values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-
-        if max_val - min_val > 14.0 {
-            return Err(FleaScopeError::SignalNotStable {
-                min: min_val,
-                max: max_val,
-            });
-        }
-
-        let cal_zero = bnc_values.iter().sum::<f64>() / bnc_values.len() as f64;
-        self.x10.cal_zero = Some(cal_zero);
-
-        if let Some(raw_3v3) = raw_value_3v3 {
-            self.x10.cal_3v3 = Some(raw_3v3 - cal_zero);
-        }
-
-        Ok(cal_zero)
+        Ok(())
     }
 
-    /// Calibrate the 10x probe for 3.3V
-    pub fn calibrate_x10_3v3(&mut self) -> Result<f64, FleaScopeError> {
-        let cal_zero = self.x10.cal_zero.ok_or(FleaScopeError::ZeroCalibrationRequired)?;
-        
-        // Read stable value for calibration - inlined to avoid borrowing issues
-        let trigger_fields = DigitalTrigger::start_capturing_when()
-            .is_matching()
-            .into_trigger_fields();
-
-        let data = self.raw_read(Duration::from_millis(20), &trigger_fields, None)?;
-        let bnc_series = data.column("bnc")?;
-        let bnc_values: Vec<f64> = bnc_series.f64()?.into_no_null_iter().collect();
-        
-        if bnc_values.is_empty() {
-            return Err(FleaScopeError::DataParsing("No data received".to_string()));
+    /// Helper method to get probe reference
+    fn get_probe(&self, probe: ProbeType) -> &FleaProbe {
+        match probe {
+            ProbeType::X1 => &self.x1,
+            ProbeType::X10 => &self.x10,
         }
-
-        let min_val = bnc_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max_val = bnc_values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-
-        if max_val - min_val > 14.0 {
-            return Err(FleaScopeError::SignalNotStable {
-                min: min_val,
-                max: max_val,
-            });
-        }
-
-        let raw_3v3 = bnc_values.iter().sum::<f64>() / bnc_values.len() as f64;
-        let cal_3v3 = raw_3v3 - cal_zero;
-        self.x10.cal_3v3 = Some(cal_3v3);
-        Ok(cal_3v3)
     }
 
-    /// Write the 1x probe calibration to flash
-    pub fn write_x1_calibration_to_flash(&mut self) -> Result<(), FleaScopeError> {
-        self.x1.write_calibration_to_flash(&mut self.serial)
-    }
-
-    /// Write the 10x probe calibration to flash
-    pub fn write_x10_calibration_to_flash(&mut self) -> Result<(), FleaScopeError> {
-        self.x10.write_calibration_to_flash(&mut self.serial)
+    /// Helper method to get mutable probe reference
+    fn get_probe_mut(&mut self, probe: ProbeType) -> &mut FleaProbe {
+        match probe {
+            ProbeType::X1 => &mut self.x1,
+            ProbeType::X10 => &mut self.x10,
+        }
     }
 }
 
@@ -785,83 +676,6 @@ impl FleaProbe {
         self.cal_3v3 = Some(raw_3v3 - cal_zero);
 
         Ok(self.cal_3v3.unwrap())
-    }
-
-    /// Read data with voltage conversion using a digital trigger
-    pub fn read_with_digital_trigger(
-        scope: &mut FleaScope,
-        probe: &FleaProbe,
-        time_frame: Duration,
-        trigger: Option<DigitalTrigger>,
-        delay: Option<Duration>,
-    ) -> Result<DataFrame, FleaScopeError> {
-        let trigger_fields = if let Some(trigger) = trigger {
-            trigger.into_trigger_fields()
-        } else {
-            DigitalTrigger::start_capturing_when()
-                .is_matching()
-                .into_trigger_fields()
-        };
-
-        let mut df = scope.raw_read(time_frame, &trigger_fields, delay)?;
-
-        // Convert BNC values from raw to voltage
-        let bnc_column = df.column("bnc")?;
-        let voltage_values: Result<Vec<Option<f64>>, _> = bnc_column
-            .f64()?
-            .into_iter()
-            .map(|opt_val| opt_val.map(|v| probe.raw_to_voltage(v)).transpose())
-            .collect();
-
-        let voltage_series = Series::new("bnc".into(), voltage_values?);
-        // Replace the bnc column
-        let _ = df.replace("bnc", voltage_series)?;
-        Ok(df)
-    }
-
-    /// Read data with voltage conversion using an analog trigger
-    pub fn read_with_analog_trigger(
-        scope: &mut FleaScope,
-        probe: &FleaProbe,
-        time_frame: Duration,
-        trigger: Option<AnalogTrigger>,
-        delay: Option<Duration>,
-    ) -> Result<DataFrame, FleaScopeError> {
-        let trigger_fields = if let Some(trigger) = trigger {
-            trigger
-                .into_trigger_fields(|v| probe.voltage_to_raw(v).unwrap_or(0.0))
-                .map_err(|_| FleaScopeError::CalibrationNotSet)?
-        } else {
-            AnalogTrigger::start_capturing_when()
-                .auto(0.0)
-                .into_trigger_fields(|v| probe.voltage_to_raw(v).unwrap_or(0.0))
-                .map_err(|_| FleaScopeError::CalibrationNotSet)?
-        };
-
-        let mut df = scope.raw_read(time_frame, &trigger_fields, delay)?;
-
-        // Convert BNC values from raw to voltage
-        let bnc_column = df.column("bnc")?;
-        let voltage_values: Result<Vec<Option<f64>>, _> = bnc_column
-            .f64()?
-            .into_iter()
-            .map(|opt_val| opt_val.map(|v| probe.raw_to_voltage(v)).transpose())
-            .collect();
-
-        let voltage_series = Series::new("bnc".into(), voltage_values?);
-        // Replace the bnc column
-        let _ = df.replace("bnc", voltage_series)?;
-        Ok(df)
-    }
-
-    /// Read data with voltage conversion (defaults to auto analog trigger)
-    pub fn read(
-        scope: &mut FleaScope,
-        probe: &FleaProbe,
-        time_frame: Duration,
-        delay: Option<Duration>,
-    ) -> Result<DataFrame, FleaScopeError> {
-        Self::read_with_analog_trigger(scope, probe, time_frame, None, delay)
     }
 
     /// Get the multiplier value

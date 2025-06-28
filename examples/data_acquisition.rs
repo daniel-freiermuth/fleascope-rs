@@ -3,7 +3,7 @@
 // This example demonstrates various trigger configurations and data acquisition methods.
 
 use fleascope_rs::{
-    FleaScope, DigitalTrigger, AnalogTrigger, BitState, Waveform
+    FleaScope, ProbeType, DigitalTrigger, AnalogTrigger, Trigger, BitState, Waveform
 };
 use polars::prelude::DataFrame;
 use std::time::Duration;
@@ -24,11 +24,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Example 1: Basic data acquisition with auto trigger
     println!("1. Basic acquisition with auto trigger (1x probe)");
-    let data1 = scope.read_x1(Duration::from_millis(10), None, None)?;
+    let data1 = scope.read(ProbeType::X1, Duration::from_millis(10), None, None)?;
     println!("   Captured {} samples over 10ms", data1.height());
     print_data_summary(&data1, "bnc")?;
 
-    // Example 2: Digital trigger
+    // Example 2: Digital trigger (using unified API)
     println!("\n2. Digital trigger acquisition");
     let digital_trigger = DigitalTrigger::start_capturing_when()
         .bit0(BitState::High)     // Trigger when bit 0 is high
@@ -36,9 +36,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .bit2(BitState::Low)      // and bit 2 is low
         .starts_matching();       // Start capturing when pattern matches
 
-    let data2 = scope.read_x1_digital(
+    let data2 = scope.read(
+        ProbeType::X1,
         Duration::from_millis(5),
-        Some(digital_trigger),
+        Some(Trigger::from(digital_trigger)), // Use unified trigger API
         None,
     )?;
     println!("   Captured {} samples with digital trigger", data2.height());
@@ -49,9 +50,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let analog_trigger = AnalogTrigger::start_capturing_when()
         .rising_edge(1.5);
 
-    let data3 = scope.read_x1(
+    let data3 = scope.read(
+        ProbeType::X1,
         Duration::from_millis(5),
-        Some(analog_trigger),
+        Some(Trigger::from(analog_trigger)),
         Some(Duration::from_micros(100)), // 100μs delay
     )?;
     println!("   Captured {} samples with analog trigger", data3.height());
@@ -59,15 +61,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Example 4: 10x probe acquisition
     println!("\n4. High voltage acquisition (10x probe)");
-    let data4 = scope.read_x10(Duration::from_millis(8), None, None)?;
+    let data4 = scope.read(ProbeType::X10, Duration::from_millis(8), None, None)?;
     println!("   Captured {} samples with 10x probe", data4.height());
     print_data_summary(&data4, "bnc")?;
 
     // Example 5: Digital bit analysis
     println!("\n5. Digital bit analysis");
-    let digital_data = scope.read_x1_digital(
+    let digital_data = scope.read(
+        ProbeType::X1,
         Duration::from_millis(3),
-        None,
+        None, // Auto trigger
         None,
     )?;
     
@@ -79,6 +82,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Show column names
     let columns: Vec<_> = bits_data.get_column_names();
     println!("   Columns: {:?}", columns);
+
+    // Example 6: Unified trigger API flexibility - mix different trigger types and probes
+    println!("\n6. Unified API flexibility demonstration");
+    
+    // Create different trigger types
+    let triggers: Vec<(Trigger, &str)> = vec![
+        (Trigger::from(AnalogTrigger::start_capturing_when().auto(0.0)), "Auto analog"),
+        (Trigger::from(AnalogTrigger::start_capturing_when().rising_edge(2.0)), "Rising edge at 2V"),
+        (Trigger::from(DigitalTrigger::start_capturing_when().bit0(BitState::High).is_matching()), "Digital bit 0 high"),
+    ];
+    
+    // Test each trigger with both probe types
+    for (probe_type, probe_name) in [(ProbeType::X1, "1x"), (ProbeType::X10, "10x")] {
+        for (trigger, trigger_name) in &triggers {
+            let data = scope.read(
+                probe_type,
+                Duration::from_millis(2),
+                Some(trigger.clone()),
+                None,
+            )?;
+            println!("   {} probe with {} trigger: {} samples", 
+                    probe_name, trigger_name, data.height());
+        }
+    }
 
     println!("\nData acquisition examples completed!");
     Ok(())

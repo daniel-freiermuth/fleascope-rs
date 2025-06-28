@@ -127,7 +127,7 @@ impl Default for BitTriggerBuilder {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DigitalTrigger {
     bit_states: [BitState; 9],
     behavior: DigitalTriggerBehavior,
@@ -200,7 +200,7 @@ impl Default for AnalogTriggerBuilder {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AnalogTrigger {
     level: f64,
     behavior: AnalogTriggerBehavior,
@@ -230,6 +230,26 @@ impl AnalogTrigger {
         }
 
         Ok(format!("{}{} 0", trigger_behavior_flag, raw_level))
+    }
+}
+
+/// A unified trigger type that can represent both analog and digital triggers.
+/// This allows treating all triggers uniformly in the API.
+#[derive(Debug, Clone)]
+pub enum Trigger {
+    Analog(AnalogTrigger),
+    Digital(DigitalTrigger),
+}
+
+impl From<AnalogTrigger> for Trigger {
+    fn from(trigger: AnalogTrigger) -> Self {
+        Self::Analog(trigger)
+    }
+}
+
+impl From<DigitalTrigger> for Trigger {
+    fn from(trigger: DigitalTrigger) -> Self {
+        Self::Digital(trigger)
     }
 }
 

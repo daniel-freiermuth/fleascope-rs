@@ -20,7 +20,7 @@
 //! ### Device Connection and Basic Usage
 //!
 //! ```rust,no_run
-//! use fleascope_rs::{FleaScope, Waveform};
+//! use fleascope_rs::{FleaScope, ProbeType, Waveform};
 //! use std::time::Duration;
 //!
 //! // Connect to any available FleaScope device
@@ -30,7 +30,7 @@
 //! scope.set_waveform(Waveform::Sine, 1000)?; // 1kHz sine wave
 //!
 //! // Read data using the 1x probe with default auto trigger
-//! let data = scope.read_x1(Duration::from_millis(10), None, None)?;
+//! let data = scope.read(ProbeType::X1, Duration::from_millis(10), None, None)?;
 //! println!("Captured {} samples", data.height());
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -65,29 +65,24 @@
 //! ### Data Acquisition with Triggers
 //!
 //! ```rust,no_run
-//! use fleascope_rs::{FleaScope, DigitalTrigger, AnalogTrigger, BitState};
+//! use fleascope_rs::{FleaScope, ProbeType, DigitalTrigger, AnalogTrigger, Trigger, BitState};
 //! use std::time::Duration;
 //!
 //! let mut scope = FleaScope::connect(None, None, true)?;
 //!
-//! // Read with digital trigger using 1x probe
+//! // Read with unified trigger API - digital trigger using 1x probe
 //! let digital_trigger = DigitalTrigger::start_capturing_when()
 //!     .bit0(BitState::High)
 //!     .starts_matching();
-//! let data = scope.read_x1_digital(
-//!     Duration::from_millis(5),
-//!     Some(digital_trigger),
-//!     None
-//! )?;
+//! let data = scope.read(ProbeType::X1, Duration::from_millis(5), Some(digital_trigger.into()), None)?;
 //!
-//! // Read with analog trigger using 10x probe
+//! // Read with unified trigger API - analog trigger using 10x probe  
 //! let analog_trigger = AnalogTrigger::start_capturing_when()
 //!     .rising_edge(2.0);
-//! let data = scope.read_x10(
-//!     Duration::from_millis(10),
-//!     Some(analog_trigger),
-//!     Some(Duration::from_micros(500)) // 500μs delay
-//! )?;
+//! let data = scope.read(ProbeType::X10, Duration::from_millis(10), Some(analog_trigger.into()), Some(Duration::from_micros(500)))?;
+//!
+//! // You can also read without triggers (auto trigger)
+//! let data = scope.read(ProbeType::X1, Duration::from_millis(5), None, None)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -125,11 +120,11 @@ pub mod trigger_config;
 // Re-export the main types for convenience
 pub use trigger_config::{
     AnalogTrigger, AnalogTriggerBehavior, AnalogTriggerBuilder, BitState, BitTriggerBuilder,
-    DigitalTrigger, DigitalTriggerBehavior,
+    DigitalTrigger, DigitalTriggerBehavior, Trigger,
 };
 
 pub use serial_terminal::{FleaTerminal, FleaTerminalError};
 
 pub use flea_connector::{FleaConnector, FleaConnectorError, FleaDevice};
 
-pub use flea_scope::{FleaProbe, FleaScope, FleaScopeError, Waveform};
+pub use flea_scope::{FleaProbe, FleaScope, FleaScopeError, ProbeType, Waveform};
