@@ -57,7 +57,11 @@ impl BitTriggerBuilder {
 
     pub fn set_bit(mut self, bit: usize, state: BitState) -> Self {
         if bit >= self.bit_states.len() {
-            panic!("Bit index {} out of range, must be between 0 and {}", bit, self.bit_states.len() - 1);
+            panic!(
+                "Bit index {} out of range, must be between 0 and {}",
+                bit,
+                self.bit_states.len() - 1
+            );
         }
         self.bit_states[bit] = state;
         self
@@ -131,7 +135,10 @@ pub struct DigitalTrigger {
 
 impl DigitalTrigger {
     pub fn new(bit_states: [BitState; 9], behavior: DigitalTriggerBehavior) -> Self {
-        Self { bit_states, behavior }
+        Self {
+            bit_states,
+            behavior,
+        }
     }
 
     pub fn start_capturing_when() -> BitTriggerBuilder {
@@ -154,7 +161,10 @@ impl DigitalTrigger {
         }
 
         let trigger_behavior_flag = self.behavior.as_str();
-        format!("{}0x{:02x} 0x{:02x}", trigger_behavior_flag, active_bits, relevant_bits)
+        format!(
+            "{}0x{:02x} 0x{:02x}",
+            trigger_behavior_flag, active_bits, relevant_bits
+        )
     }
 }
 
@@ -211,8 +221,8 @@ impl AnalogTrigger {
     {
         let trigger_behavior_flag = self.behavior.as_str();
         let raw_level = (voltage_to_raw(self.level) / 4.0 + 0.5) as i32;
-        
-        if raw_level < -1023 || raw_level > 1023 {
+
+        if !(-1023..=1023).contains(&raw_level) {
             return Err(format!(
                 "Voltage {} out of range, must be between -1023 and 1023 raw units",
                 self.level
@@ -233,16 +243,15 @@ mod tests {
             .bit0(BitState::High)
             .bit1(BitState::Low)
             .is_matching();
-        
+
         let trigger_fields = trigger.into_trigger_fields();
         assert_eq!(trigger_fields, "0x01 0x03");
     }
 
     #[test]
     fn test_analog_trigger() {
-        let trigger = AnalogTrigger::start_capturing_when()
-            .rising_edge(1.5);
-        
+        let trigger = AnalogTrigger::start_capturing_when().rising_edge(1.5);
+
         let voltage_to_raw = |v: f64| v * 100.0; // Example conversion
         let trigger_fields = trigger.into_trigger_fields(voltage_to_raw).unwrap();
         assert_eq!(trigger_fields, "+38 0");
@@ -250,9 +259,8 @@ mod tests {
 
     #[test]
     fn test_analog_trigger_out_of_range() {
-        let trigger = AnalogTrigger::start_capturing_when()
-            .level(100.0);
-        
+        let trigger = AnalogTrigger::start_capturing_when().level(100.0);
+
         let voltage_to_raw = |v: f64| v * 100.0; // This will create a value out of range
         let result = trigger.into_trigger_fields(voltage_to_raw);
         assert!(result.is_err());
@@ -261,7 +269,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "Bit index 9 out of range")]
     fn test_digital_trigger_builder_panic_on_invalid_bit() {
-        DigitalTrigger::start_capturing_when()
-            .set_bit(9, BitState::High); // This should panic since valid range is 0-8
+        DigitalTrigger::start_capturing_when().set_bit(9, BitState::High); // This should panic since valid range is 0-8
     }
 }

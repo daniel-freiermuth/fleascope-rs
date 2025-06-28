@@ -1,6 +1,6 @@
+use crate::serial_terminal::{FleaTerminal, FleaTerminalError};
 use std::thread;
 use std::time::Duration;
-use crate::serial_terminal::{FleaTerminal, FleaTerminalError};
 
 #[derive(Debug, Clone)]
 pub struct FleaDevice {
@@ -18,16 +18,18 @@ impl FleaDevice {
 pub enum FleaConnectorError {
     #[error("Serial terminal error: {0}")]
     SerialTerminal(#[from] FleaTerminalError),
-    
+
     #[error("Serial port error: {0}")]
     SerialPort(#[from] serialport::Error),
-    
+
     #[error("Port {port} is not the FleaScope device you're looking for")]
     InvalidPort { port: String },
-    
-    #[error("No FleaScope device {name} found. Please connect a FleaScope or specify the port manually")]
+
+    #[error(
+        "No FleaScope device {name} found. Please connect a FleaScope or specify the port manually"
+    )]
     DeviceNotFound { name: String },
-    
+
     #[error("Device validation failed")]
     DeviceValidationFailed,
 }
@@ -49,49 +51,49 @@ impl FleaConnector {
             let device_name = name.unwrap_or("FleaScope");
             Self::get_working_serial(device_name)?
         };
-        
+
         terminal.initialize()?;
         Ok(terminal)
     }
-    
+
     /// Validate that a given port corresponds to a FleaScope device
     fn validate_port(name: Option<&str>, port: &str) -> Result<(), FleaConnectorError> {
         let mut devices = Self::get_available_devices(name)?;
-        
+
         if !devices.any(|d| d.port == port) {
             return Err(FleaConnectorError::InvalidPort {
                 port: port.to_string(),
             });
         }
-        
+
         Ok(())
     }
-    
+
     /// Validate that a serial port info represents a FleaScope device
     fn validate_device(name: Option<&str>, port_info: &serialport::SerialPortInfo) -> bool {
         // Valid vendor/product ID combinations for FleaScope devices
         let valid_vendor_product_variants = [
             (0x0403, 0xa660), // FTDI vendor, FleaScope product
-            (0x1b4f, 0xa660), // SparkFun vendor, FleaScope product  
+            (0x1b4f, 0xa660), // SparkFun vendor, FleaScope product
             (0x1b4f, 0xe66e), // SparkFun vendor, alternative product
             (0x04d8, 0xe66e), // Microchip vendor, alternative product
         ];
-        
+
         // Only check USB devices
         let usb_info = match &port_info.port_type {
             serialport::SerialPortType::UsbPort(usb_info) => usb_info,
             _ => return false,
         };
-        
+
         // Check if vendor/product combination is valid
         let is_valid_variant = valid_vendor_product_variants
             .iter()
             .any(|(vid, pid)| usb_info.vid == *vid && usb_info.pid == *pid);
-        
+
         if !is_valid_variant {
             return false;
         }
-        
+
         // Check if name matches (if specified)
         if let Some(expected_name) = name {
             if let Some(product_name) = &usb_info.product {
@@ -102,43 +104,44 @@ impl FleaConnector {
                 return false;
             }
         }
-        
+
         true
     }
-    
+
     /// Get all available FleaScope devices as an iterator
-    pub fn get_available_devices(name: Option<&str>) -> Result<impl Iterator<Item = FleaDevice>, FleaConnectorError> {
+    pub fn get_available_devices(
+        name: Option<&str>,
+    ) -> Result<impl Iterator<Item = FleaDevice>, FleaConnectorError> {
         let ports = serialport::available_ports()?;
         let name_owned = name.map(|s| s.to_string());
-        
+
         Ok(ports.into_iter().filter_map(move |port_info| {
             // Only consider USB devices
             if let serialport::SerialPortType::UsbPort(usb_info) = &port_info.port_type {
                 // Must have a product name and pass validation
                 if let Some(device_name) = usb_info.product.clone() {
                     if Self::validate_device(name_owned.as_deref(), &port_info) {
-                        return Some(FleaDevice::new(
-                            device_name,
-                            port_info.port_name,
-                        ));
+                        return Some(FleaDevice::new(device_name, port_info.port_name));
                     }
                 }
             }
             None
         }))
     }
-    
+
     /// Get all available FleaScope devices as a Vec (convenience method)
-    pub fn get_available_devices_vec(name: Option<&str>) -> Result<Vec<FleaDevice>, FleaConnectorError> {
+    pub fn get_available_devices_vec(
+        name: Option<&str>,
+    ) -> Result<Vec<FleaDevice>, FleaConnectorError> {
         Ok(Self::get_available_devices(name)?.collect())
     }
-    
+
     /// Get the port for a device with the given name
     fn get_device_port(name: &str) -> Result<String, FleaConnectorError> {
         log::debug!("Searching for FleaScope device with name {}", name);
-        
+
         let mut devices = Self::get_available_devices(Some(name))?;
-        
+
         devices
             .next()
             .map(|device| device.port)
@@ -146,13 +149,13 @@ impl FleaConnector {
                 name: name.to_string(),
             })
     }
-    
+
     /// Get a working serial connection, retrying if necessary
     fn get_working_serial(name: &str) -> Result<FleaTerminal, FleaConnectorError> {
         loop {
             let port_candidate = Self::get_device_port(name)?;
             let mut serial = FleaTerminal::new(&port_candidate)?;
-            
+
             match serial.initialize() {
                 Ok(_) => break Ok(serial),
                 Err(FleaTerminalError::Timeout { .. }) => {
@@ -175,7 +178,7 @@ mod tests {
     fn test_get_available_devices() {
         // This test will depend on what devices are actually connected
         let result = FleaConnector::get_available_devices_vec(None);
-        
+
         match result {
             Ok(devices) => {
                 // If we find devices, make sure they have valid names and ports
@@ -194,7 +197,7 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_device_validation_logic() {
         // Test the validation logic with some example data
@@ -205,16 +208,22 @@ mod tests {
             manufacturer: Some("FTDI".to_string()),
             product: Some("FleaScope".to_string()),
         };
-        
+
         let valid_port_info = serialport::SerialPortInfo {
             port_name: "/dev/ttyUSB0".to_string(),
             port_type: serialport::SerialPortType::UsbPort(valid_usb_info),
         };
-        
+
         assert!(FleaConnector::validate_device(None, &valid_port_info));
-        assert!(FleaConnector::validate_device(Some("FleaScope"), &valid_port_info));
-        assert!(!FleaConnector::validate_device(Some("OtherDevice"), &valid_port_info));
-        
+        assert!(FleaConnector::validate_device(
+            Some("FleaScope"),
+            &valid_port_info
+        ));
+        assert!(!FleaConnector::validate_device(
+            Some("OtherDevice"),
+            &valid_port_info
+        ));
+
         // Test with invalid VID/PID
         let invalid_usb_info = serialport::UsbPortInfo {
             vid: 0x1234,
@@ -223,31 +232,31 @@ mod tests {
             manufacturer: None,
             product: None,
         };
-        
+
         let invalid_port_info = serialport::SerialPortInfo {
             port_name: "/dev/ttyUSB1".to_string(),
             port_type: serialport::SerialPortType::UsbPort(invalid_usb_info),
         };
-        
+
         assert!(!FleaConnector::validate_device(None, &invalid_port_info));
     }
-    
+
     #[test]
     fn test_iterator_benefits() {
         // Test that we can use iterator methods directly
         let result = FleaConnector::get_available_devices(None);
-        
+
         match result {
             Ok(mut devices) => {
                 // Example: Take only the first device (lazy evaluation)
                 let _first_device = devices.next();
                 // This is more efficient than collecting all devices into a Vec first
-                
+
                 // Example: Count without allocating a Vec
                 let device_count = FleaConnector::get_available_devices(None)
                     .map(|iter| iter.count())
                     .unwrap_or(0);
-                
+
                 println!("Found {} FleaScope devices", device_count);
             }
             Err(_) => {
