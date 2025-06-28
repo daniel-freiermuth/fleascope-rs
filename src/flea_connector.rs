@@ -19,8 +19,8 @@ pub enum FleaConnectorError {
     #[error("Serial terminal error: {0}")]
     SerialTerminal(#[from] FleaTerminalError),
     
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("Serial port error: {0}")]
+    SerialPort(#[from] serialport::Error),
     
     #[error("Port {port} is not the FleaScope device you're looking for")]
     InvalidPort { port: String },
@@ -56,8 +56,6 @@ impl FleaConnector {
     
     /// Validate that a given port corresponds to a FleaScope device
     fn validate_port(name: Option<&str>, port: &str) -> Result<(), FleaConnectorError> {
-        // For now, we'll do a simplified validation
-        // In a full implementation, you'd use udev to check device properties
         let devices = Self::get_available_devices(name)?;
         
         if !devices.iter().any(|d| d.port == port) {
@@ -69,35 +67,26 @@ impl FleaConnector {
         Ok(())
     }
     
-    /// Validate that a udev device is a FleaScope
-    fn validate_device(name: Option<&str>, device: &udev::Device) -> bool {
-        let valid_vendor_model_variants = [
-            ["0403", "a660"],
-            ["1b4f", "a660"],
-            ["1b4f", "e66e"],
-            ["04d8", "e66e"],
+    /// Validate that a serial port info represents a FleaScope device
+    fn validate_device(name: Option<&str>, port_info: &serialport::SerialPortInfo) -> bool {
+        // Valid vendor/product ID combinations for FleaScope devices
+        let valid_vendor_product_variants = [
+            (0x0403, 0xa660), // FTDI vendor, FleaScope product
+            (0x1b4f, 0xa660), // SparkFun vendor, FleaScope product  
+            (0x1b4f, 0xe66e), // SparkFun vendor, alternative product
+            (0x04d8, 0xe66e), // Microchip vendor, alternative product
         ];
         
-        // Check if device has required properties
-        let vendor_id = match device.property_value("ID_VENDOR_ID") {
-            Some(id) => id.to_string_lossy(),
-            None => return false,
+        // Only check USB devices
+        let usb_info = match &port_info.port_type {
+            serialport::SerialPortType::UsbPort(usb_info) => usb_info,
+            _ => return false,
         };
         
-        let model_id = match device.property_value("ID_MODEL_ID") {
-            Some(id) => id.to_string_lossy(),
-            None => return false,
-        };
-        
-        let model = match device.property_value("ID_MODEL") {
-            Some(model) => model.to_string_lossy(),
-            None => return false,
-        };
-        
-        // Check if vendor/model combination is valid
-        let is_valid_variant = valid_vendor_model_variants
+        // Check if vendor/product combination is valid
+        let is_valid_variant = valid_vendor_product_variants
             .iter()
-            .any(|[vid, mid]| vendor_id == *vid && model_id == *mid);
+            .any(|(vid, pid)| usb_info.vid == *vid && usb_info.pid == *pid);
         
         if !is_valid_variant {
             return false;
@@ -105,7 +94,11 @@ impl FleaConnector {
         
         // Check if name matches (if specified)
         if let Some(expected_name) = name {
-            if model != expected_name {
+            if let Some(product_name) = &usb_info.product {
+                if product_name != expected_name {
+                    return false;
+                }
+            } else {
                 return false;
             }
         }
@@ -115,22 +108,24 @@ impl FleaConnector {
     
     /// Get all available FleaScope devices
     pub fn get_available_devices(name: Option<&str>) -> Result<Vec<FleaDevice>, FleaConnectorError> {
-        let mut enumerator = udev::Enumerator::new()?;
-        enumerator.match_subsystem("tty")?;
+        let ports = serialport::available_ports()?;
         
         let mut devices = Vec::new();
         
-        for device in enumerator.scan_devices()? {
-            if Self::validate_device(name, &device) {
-                if let (Some(model), Some(device_node)) = (
-                    device.property_value("ID_MODEL"),
-                    device.devnode(),
-                ) {
-                    devices.push(FleaDevice::new(
-                        model.to_string_lossy().to_string(),
-                        device_node.to_string_lossy().to_string(),
-                    ));
-                }
+        for port_info in ports {
+            if Self::validate_device(name, &port_info) {
+                let device_name = if let serialport::SerialPortType::UsbPort(usb_info) = &port_info.port_type {
+                    usb_info.product.clone()
+                        .or_else(|| usb_info.manufacturer.clone())
+                        .unwrap_or_else(|| "FleaScope".to_string())
+                } else {
+                    "FleaScope".to_string()
+                };
+                
+                devices.push(FleaDevice::new(
+                    device_name,
+                    port_info.port_name,
+                ));
             }
         }
         
@@ -179,7 +174,6 @@ mod tests {
     #[test]
     fn test_get_available_devices() {
         // This test will depend on what devices are actually connected
-        // In a real test environment, you might want to mock the udev calls
         let result = FleaConnector::get_available_devices(None);
         
         match result {
@@ -188,11 +182,12 @@ mod tests {
                 for device in devices {
                     assert!(!device.name.is_empty());
                     assert!(!device.port.is_empty());
-                    assert!(device.port.starts_with('/'));
+                    // Port should be a valid path (Unix) or COM port (Windows)
+                    assert!(device.port.starts_with('/') || device.port.starts_with("COM"));
                 }
             }
-            Err(FleaConnectorError::Io(_)) => {
-                // Expected if udev is not available or accessible
+            Err(FleaConnectorError::SerialPort(_)) => {
+                // Expected if serial port enumeration fails
             }
             Err(e) => {
                 panic!("Unexpected error: {:?}", e);
@@ -201,9 +196,39 @@ mod tests {
     }
     
     #[test]
-    fn test_device_validation() {
-        // Test the validation logic with mock data would require more complex mocking
-        // For now, we can at least test that the function doesn't panic
-        // In a real implementation, you'd want to create mock udev::Device objects
+    fn test_device_validation_logic() {
+        // Test the validation logic with some example data
+        let valid_usb_info = serialport::UsbPortInfo {
+            vid: 0x0403,
+            pid: 0xa660,
+            serial_number: Some("12345".to_string()),
+            manufacturer: Some("FTDI".to_string()),
+            product: Some("FleaScope".to_string()),
+        };
+        
+        let valid_port_info = serialport::SerialPortInfo {
+            port_name: "/dev/ttyUSB0".to_string(),
+            port_type: serialport::SerialPortType::UsbPort(valid_usb_info),
+        };
+        
+        assert!(FleaConnector::validate_device(None, &valid_port_info));
+        assert!(FleaConnector::validate_device(Some("FleaScope"), &valid_port_info));
+        assert!(!FleaConnector::validate_device(Some("OtherDevice"), &valid_port_info));
+        
+        // Test with invalid VID/PID
+        let invalid_usb_info = serialport::UsbPortInfo {
+            vid: 0x1234,
+            pid: 0x5678,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+        };
+        
+        let invalid_port_info = serialport::SerialPortInfo {
+            port_name: "/dev/ttyUSB1".to_string(),
+            port_type: serialport::SerialPortType::UsbPort(invalid_usb_info),
+        };
+        
+        assert!(!FleaConnector::validate_device(None, &invalid_port_info));
     }
 }
