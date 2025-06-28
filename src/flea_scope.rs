@@ -172,17 +172,14 @@ impl FleaScope {
         let mut df = self.raw_read(time_frame, &trigger_fields, delay)?;
 
         // Convert BNC values from raw to voltage
-        let bnc_column = df.column("bnc")?;
         let probe_ref = self.get_probe(probe);
-        let voltage_values: Result<Vec<Option<f64>>, _> = bnc_column
-            .f64()?
-            .into_iter()
-            .map(|opt_val| opt_val.map(|v| probe_ref.raw_to_voltage(v)).transpose())
-            .collect();
+        let res = df.lazy().select([
+            col("time"),
+            probe_ref.raw_to_voltage(col("bnc"))?,
+            col("bitmap"),
+        ]);
 
-        let voltage_series = Series::new("bnc".into(), voltage_values?);
-        let _ = df.replace("bnc", voltage_series)?;
-        Ok(df)
+        Ok(res.collect()?)
     }
 
 
@@ -248,7 +245,7 @@ impl FleaScope {
         }
 
         let number1 = (Self::MSPS * Self::duration_to_us(time_frame) as f64
-            / (Self::TOTAL_SAMPLES * 1_000_000.0)) as i32;
+            / Self::TOTAL_SAMPLES) as i32;
         if number1 <= 0 {
             return Err(FleaScopeError::InvalidTicksPerSample);
         }
@@ -633,11 +630,11 @@ impl FleaProbe {
     }
 
     /// Convert raw ADC value to voltage
-    pub fn raw_to_voltage(&self, raw_value: f64) -> Result<f64, FleaScopeError> {
+    pub fn raw_to_voltage(&self, raw_value: Expr) -> Result<Expr, FleaScopeError> {
         let cal_zero = self.cal_zero.ok_or(FleaScopeError::CalibrationNotSet)?;
         let cal_3v3 = self.cal_3v3.ok_or(FleaScopeError::CalibrationNotSet)?;
 
-        Ok((raw_value - cal_zero) / cal_3v3 * 3.3)
+        Ok((raw_value - cal_zero.into()) / cal_3v3.into() * 3.3.into())
     }
 
     /// Convert voltage to raw ADC value
@@ -722,6 +719,6 @@ mod tests {
         assert_eq!(probe.calibration(), (Some(2048.0), Some(1000.0)));
 
         assert!(probe.voltage_to_raw(3.3).is_ok());
-        assert!(probe.raw_to_voltage(3048.0).is_ok());
+        assert!(probe.raw_to_voltage(3048.0.into()).is_ok());
     }
 }
