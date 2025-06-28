@@ -78,7 +78,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         match scope.read(probe, time_frame, Some(trigger.clone()), None) {
-            Ok(data) => {
+            Ok(ldata) => {
+                let data = ldata.collect()?;
                 sample_count += 1;
                 let num_samples = data.height();
                 let elapsed = start_time.elapsed();

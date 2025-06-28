@@ -149,7 +149,7 @@ impl FleaScope {
         time_frame: Duration,
         trigger: Option<Trigger>,
         delay: Option<Duration>,
-    ) -> Result<DataFrame, FleaScopeError> {
+    ) -> Result<LazyFrame, FleaScopeError> {
         let trigger_fields = if let Some(trigger) = trigger {
             match trigger {
                 Trigger::Analog(analog_trigger) => {
@@ -169,17 +169,17 @@ impl FleaScope {
                 .map_err(|_| FleaScopeError::CalibrationNotSet)?
         };
 
-        let mut df = self.raw_read(time_frame, &trigger_fields, delay)?;
+        let df = self.raw_read(time_frame, &trigger_fields, delay)?;
 
         // Convert BNC values from raw to voltage
         let probe_ref = self.get_probe(probe);
-        let res = df.lazy().select([
+        let res = df.select([
             col("time"),
             probe_ref.raw_to_voltage(col("bnc"))?,
             col("bitmap"),
         ]);
 
-        Ok(res.collect()?)
+        Ok(res)
     }
 
 
@@ -222,7 +222,7 @@ impl FleaScope {
         time_frame: Duration,
         trigger_fields: &str,
         delay: Option<Duration>,
-    ) -> Result<DataFrame, FleaScopeError> {
+    ) -> Result<LazyFrame, FleaScopeError> {
         let delay = delay.unwrap_or(Duration::from_millis(0));
 
         // Validate time frame
@@ -273,39 +273,23 @@ impl FleaScope {
             None,
         )?;
 
-        // Parse CSV data manually since polars API is complex
-        let mut bnc_values = Vec::new();
-        let mut bitmap_values = Vec::new();
-
-        let mut rdr = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .from_reader(data.as_bytes());
-
-        for result in rdr.records() {
-            let record = result
-                .map_err(|e| FleaScopeError::DataParsing(format!("CSV parse error: {}", e)))?;
-            if record.len() >= 2 {
-                let bnc: f64 = record[0].parse().map_err(|e| {
-                    FleaScopeError::DataParsing(format!("Failed to parse BNC value: {}", e))
-                })?;
-                let bitmap = record[1].to_string();
-                bnc_values.push(bnc);
-                bitmap_values.push(bitmap);
-            }
-        }
-
-        // Create time index
-        let time_step = 1.0 / (effective_msps * 1_000_000.0);
-        let time_index: Vec<f64> = (0..bnc_values.len())
-            .map(|i| i as f64 * time_step)
-            .collect();
-
-        // Create DataFrame
-        let df = df! {
-            "time" => time_index,
-            "bnc" => bnc_values,
-            "bitmap" => bitmap_values,
-        }?;
+        // Parse CSV data using Polars LazyFrames - you're absolutely right!
+        // For cases where we might only need one column, LazyFrames provide significant benefits
+        let df = CsvReadOptions::default()
+            .with_has_header(false)
+            .into_reader_with_file_handle(std::io::Cursor::new(data.as_bytes()))
+            .finish().unwrap()
+            .lazy()
+            .select([
+                col("column_1").alias("bnc").cast(DataType::Float64),
+                col("column_2").alias("bitmap"),
+            ])
+            .with_row_index("row_index", Some(0))
+            .with_columns([
+                // Create time column using row index - more efficient than separate vector creation
+                (col("row_index").cast(DataType::Float64) * lit(1.0 / (effective_msps * 1_000_000.0))).alias("time")
+            ])
+            .select([col("time"), col("bnc"), col("bitmap")]);
 
         Ok(df)
     }
@@ -383,7 +367,8 @@ impl FleaScope {
             .into_trigger_fields();
 
         let data = self.raw_read(Duration::from_millis(20), &trigger_fields, None)?;
-        let bnc_series = data.column("bnc")?;
+        let relevant_data = data.select([col("bnc"),]).collect()?;
+        let bnc_series = relevant_data.column("bnc")?;
         let bnc_values: Vec<f64> = bnc_series.f64()?.into_no_null_iter().collect();
         
         if bnc_values.is_empty() {
@@ -424,7 +409,8 @@ impl FleaScope {
             .into_trigger_fields();
 
         let data = self.raw_read(Duration::from_millis(20), &trigger_fields, None)?;
-        let bnc_series = data.column("bnc")?;
+        let relevant_data = data.select([col("bnc"),]).collect()?;
+        let bnc_series = relevant_data.column("bnc")?;
         let bnc_values: Vec<f64> = bnc_series.f64()?.into_no_null_iter().collect();
         
         if bnc_values.is_empty() {
@@ -612,7 +598,8 @@ impl FleaProbe {
 
         let data = scope.raw_read(Duration::from_millis(20), &trigger_fields, None)?;
 
-        let bnc_series = data.column("bnc")?;
+        let relevant_data = data.select([col("bnc"),]).collect()?;
+        let bnc_series = relevant_data.column("bnc")?;
         let bnc_values: Vec<f64> = bnc_series.f64()?.into_no_null_iter().collect();
 
         let min_val = bnc_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
