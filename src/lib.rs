@@ -46,11 +46,15 @@
 //! // Or connect to a specific port
 //! let terminal = FleaConnector::connect(None, Some("/dev/ttyUSB0"), true).unwrap();
 //! 
-//! // List available devices
+//! // List available devices (iterator - memory efficient)
 //! let devices = FleaConnector::get_available_devices(None).unwrap();
-//! for device in devices {
+//! for device in devices.take(3) { // Only process first 3 devices
 //!     println!("Found device: {} at {}", device.name, device.port);
 //! }
+//! 
+//! // Or get all devices as a Vec (if you need to access multiple times)
+//! let devices_vec = FleaConnector::get_available_devices_vec(None).unwrap();
+//! println!("Total devices: {}", devices_vec.len());
 //! ```
 //! 
 //! ### Serial Terminal Communication

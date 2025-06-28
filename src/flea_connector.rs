@@ -56,9 +56,9 @@ impl FleaConnector {
     
     /// Validate that a given port corresponds to a FleaScope device
     fn validate_port(name: Option<&str>, port: &str) -> Result<(), FleaConnectorError> {
-        let devices = Self::get_available_devices(name)?;
+        let mut devices = Self::get_available_devices(name)?;
         
-        if !devices.iter().any(|d| d.port == port) {
+        if !devices.any(|d| d.port == port) {
             return Err(FleaConnectorError::InvalidPort {
                 port: port.to_string(),
             });
@@ -106,37 +106,40 @@ impl FleaConnector {
         true
     }
     
-    /// Get all available FleaScope devices
-    pub fn get_available_devices(name: Option<&str>) -> Result<Vec<FleaDevice>, FleaConnectorError> {
+    /// Get all available FleaScope devices as an iterator
+    pub fn get_available_devices(name: Option<&str>) -> Result<impl Iterator<Item = FleaDevice>, FleaConnectorError> {
         let ports = serialport::available_ports()?;
+        let name_owned = name.map(|s| s.to_string());
         
-        let mut devices = Vec::new();
-        
-        for port_info in ports {
+        Ok(ports.into_iter().filter_map(move |port_info| {
             // Only consider USB devices
             if let serialport::SerialPortType::UsbPort(usb_info) = &port_info.port_type {
-                // Must have a product or manufacturer name
+                // Must have a product name and pass validation
                 if let Some(device_name) = usb_info.product.clone() {
-                    if Self::validate_device(name, &port_info) {
-                        devices.push(FleaDevice::new(
+                    if Self::validate_device(name_owned.as_deref(), &port_info) {
+                        return Some(FleaDevice::new(
                             device_name,
-                            port_info.port_name.clone(),
+                            port_info.port_name,
                         ));
                     }
                 }
             }
-        }
-        Ok(devices)
+            None
+        }))
+    }
+    
+    /// Get all available FleaScope devices as a Vec (convenience method)
+    pub fn get_available_devices_vec(name: Option<&str>) -> Result<Vec<FleaDevice>, FleaConnectorError> {
+        Ok(Self::get_available_devices(name)?.collect())
     }
     
     /// Get the port for a device with the given name
     fn get_device_port(name: &str) -> Result<String, FleaConnectorError> {
         log::debug!("Searching for FleaScope device with name {}", name);
         
-        let devices = Self::get_available_devices(Some(name))?;
+        let mut devices = Self::get_available_devices(Some(name))?;
         
         devices
-            .into_iter()
             .next()
             .map(|device| device.port)
             .ok_or_else(|| FleaConnectorError::DeviceNotFound {
@@ -171,7 +174,7 @@ mod tests {
     #[test]
     fn test_get_available_devices() {
         // This test will depend on what devices are actually connected
-        let result = FleaConnector::get_available_devices(None);
+        let result = FleaConnector::get_available_devices_vec(None);
         
         match result {
             Ok(devices) => {
@@ -227,5 +230,29 @@ mod tests {
         };
         
         assert!(!FleaConnector::validate_device(None, &invalid_port_info));
+    }
+    
+    #[test]
+    fn test_iterator_benefits() {
+        // Test that we can use iterator methods directly
+        let result = FleaConnector::get_available_devices(None);
+        
+        match result {
+            Ok(mut devices) => {
+                // Example: Take only the first device (lazy evaluation)
+                let _first_device = devices.next();
+                // This is more efficient than collecting all devices into a Vec first
+                
+                // Example: Count without allocating a Vec
+                let device_count = FleaConnector::get_available_devices(None)
+                    .map(|iter| iter.count())
+                    .unwrap_or(0);
+                
+                println!("Found {} FleaScope devices", device_count);
+            }
+            Err(_) => {
+                // Expected if no devices or enumeration fails
+            }
+        }
     }
 }
