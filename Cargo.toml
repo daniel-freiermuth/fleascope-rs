@@ -1,0 +1,14 @@
+[package]
+name = "fleascope-rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fleascope_rs"
+path = "src/lib.rs"
+
+[dependencies]
+serialport = "4.0"
+log = "0.4"
+thiserror = "1.0"
+udev = "0.8"
