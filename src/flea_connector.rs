@@ -113,22 +113,19 @@ impl FleaConnector {
         let mut devices = Vec::new();
         
         for port_info in ports {
-            if Self::validate_device(name, &port_info) {
-                let device_name = if let serialport::SerialPortType::UsbPort(usb_info) = &port_info.port_type {
-                    usb_info.product.clone()
-                        .or_else(|| usb_info.manufacturer.clone())
-                        .unwrap_or_else(|| "FleaScope".to_string())
-                } else {
-                    "FleaScope".to_string()
-                };
-                
-                devices.push(FleaDevice::new(
-                    device_name,
-                    port_info.port_name,
-                ));
+            // Only consider USB devices
+            if let serialport::SerialPortType::UsbPort(usb_info) = &port_info.port_type {
+                // Must have a product or manufacturer name
+                if let Some(device_name) = usb_info.product.clone() {
+                    if Self::validate_device(name, &port_info) {
+                        devices.push(FleaDevice::new(
+                            device_name,
+                            port_info.port_name.clone(),
+                        ));
+                    }
+                }
             }
         }
-        
         Ok(devices)
     }
     
