@@ -296,7 +296,7 @@ impl IdleFleaScope {
         let df = CsvReadOptions::default()
             .with_has_header(false)
             .into_reader_with_file_handle(std::io::Cursor::new(csv_data.as_bytes()))
-            .finish().unwrap()
+            .finish()?
             .lazy()
             .select([
                 col("column_1").alias("bnc").cast(DataType::Float64),
