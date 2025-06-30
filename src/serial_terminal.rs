@@ -1,6 +1,6 @@
 use serialport::SerialPort;
 use std::io::{Error, Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::sync::Mutex;
 
 #[derive(Debug)]
@@ -35,7 +35,7 @@ impl FleaTerminal {
     /// Create a new FleaTerminal instance
     pub fn new(port: &str) -> Result<Self, FleaTerminalError> {
         let serial = serialport::new(port, 9600)
-            .timeout(Duration::from_millis(1000))
+            .timeout(Duration::from_millis(10))
             .open()?;
 
         let mut terminal = Self {
@@ -90,11 +90,6 @@ impl FleaTerminal {
             // Lock the serial port for exclusive access
             let mut serial = self.serial.lock().expect("Failed to lock serial port");
 
-            // Set timeout
-            if let Some(timeout) = timeout {
-                serial.set_timeout(timeout)?;
-            }
-                
             // Send command
             let command_with_newline = format!("{}\n", command);
             serial.write_all(command_with_newline.as_bytes())?;
@@ -105,13 +100,12 @@ impl FleaTerminal {
         let mut response = Vec::new();
         let prompt_bytes = self.prompt.as_bytes();
         let mut window = Vec::new();
+        let now = Instant::now();
 
         loop {
             let mut byte = [0u8; 1];
-            let mut serial = self.serial.lock().expect("Failed to lock serial port");
-            match serial.read_exact(&mut byte) {
+            match self.serial.lock().expect("Failed to lock serial port").read_exact(&mut byte) {
                 Ok(_) => {
-                    drop(serial);
                     response.push(byte[0]);
                     window.push(byte[0]);
 
@@ -126,19 +120,23 @@ impl FleaTerminal {
                     }
                 }
                 Err(_e) => {
-                    // Handle timeout
-                    let _response_str = String::from_utf8_lossy(&response);
-                    let actual_ending = if response.len() >= 2 {
-                        String::from_utf8_lossy(&response[response.len() - 2..]).to_string()
-                    } else {
-                        String::from_utf8_lossy(&response).to_string()
-                    };
+                    match timeout {
+                        Some(t) if now.elapsed() >= t => {
+                            let _response_str = String::from_utf8_lossy(&response);
+                            let actual_ending = if response.len() >= 2 {
+                                String::from_utf8_lossy(&response[response.len() - 2..]).to_string()
+                            } else {
+                                String::from_utf8_lossy(&response).to_string()
+                            };
 
-                    return Err(FleaTerminalError::Timeout {
-                        expected: self.prompt.clone(),
-                        actual: actual_ending,
-                    });
-                }
+                            return Err(FleaTerminalError::Timeout {
+                                expected: self.prompt.clone(),
+                                actual: actual_ending,
+                            });
+                        }
+                        _ => {}
+                    }
+                 }
             }
         }
 
