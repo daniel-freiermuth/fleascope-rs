@@ -1,10 +1,11 @@
 use serialport::SerialPort;
-use std::io::{Read, Write};
+use std::io::{Error, Read, Write};
 use std::time::Duration;
+use std::sync::Mutex;
 
 #[derive(Debug)]
 pub struct FleaTerminal {
-    serial: Box<dyn SerialPort>,
+    serial: Mutex<Box<dyn SerialPort>>,
     port: String,
     prompt: String,
     initialized: bool,
@@ -38,7 +39,7 @@ impl FleaTerminal {
             .open()?;
 
         let mut terminal = Self {
-            serial,
+            serial: Mutex::new(serial),
             port: port.to_string(),
             prompt: "> ".to_string(),
             initialized: false,
@@ -63,13 +64,14 @@ impl FleaTerminal {
 
     /// Flush the serial buffer
     fn flush(&mut self) -> Result<(), FleaTerminalError> {
-        self.serial.clear(serialport::ClearBuffer::All)?;
+        let serial = self.serial.lock().expect("Failed to lock serial"); 
+        serial.clear(serialport::ClearBuffer::All)?;
         Ok(())
     }
 
     /// Execute a command (public interface)
     pub fn exec(
-        &mut self,
+        &self,
         command: &str,
         timeout: Option<Duration>,
     ) -> Result<String, FleaTerminalError> {
@@ -79,19 +81,24 @@ impl FleaTerminal {
         self.exec_internal(command, timeout)
     }
 
-    /// Execute a command (internal implementation)
     fn exec_internal(
-        &mut self,
+        &self,
         command: &str,
         timeout: Option<Duration>,
     ) -> Result<String, FleaTerminalError> {
-        // Send command
-        let command_with_newline = format!("{}\n", command);
-        self.serial.write_all(command_with_newline.as_bytes())?;
+        {
+            // Lock the serial port for exclusive access
+            let mut serial = self.serial.lock().expect("Failed to lock serial port");
 
-        // Set timeout
-        if let Some(timeout) = timeout {
-            self.serial.set_timeout(timeout)?;
+            // Set timeout
+            if let Some(timeout) = timeout {
+                serial.set_timeout(timeout)?;
+            }
+                
+            // Send command
+            let command_with_newline = format!("{}\n", command);
+            serial.write_all(command_with_newline.as_bytes())?;
+
         }
 
         // Read response until prompt
@@ -101,8 +108,10 @@ impl FleaTerminal {
 
         loop {
             let mut byte = [0u8; 1];
-            match self.serial.read_exact(&mut byte) {
+            let mut serial = self.serial.lock().expect("Failed to lock serial port");
+            match serial.read_exact(&mut byte) {
                 Ok(_) => {
+                    drop(serial);
                     response.push(byte[0]);
                     window.push(byte[0]);
 
@@ -141,14 +150,16 @@ impl FleaTerminal {
     }
 
     /// Send CTRL-C character
-    pub fn send_ctrl_c(&mut self) -> Result<(), FleaTerminalError> {
-        self.serial.write_all(&[0x03])?;
+    pub fn send_ctrl_c(&self) -> Result<(), FleaTerminalError> {
+        let mut serial = self.serial.lock().expect("Failed to lock serial console");
+        serial.write_all(&[0x03])?;
         Ok(())
     }
 
     /// Send reset command
-    pub fn send_reset(&mut self) -> Result<(), FleaTerminalError> {
-        self.serial.write_all(b"reset\n")?;
+    pub fn send_reset(&self) -> Result<(), FleaTerminalError> {
+        let mut serial = self.serial.lock().expect("Failed to lock serial terminal");
+        serial.write_all(b"reset\n")?;
         Ok(())
     }
 
@@ -157,6 +168,12 @@ impl FleaTerminal {
         self.initialized
     }
 }
+
+// SAFETY: FleaTerminal uses Mutex internally which provides thread safety
+// The SerialPort trait object is protected by Mutex, making it safe to share
+// across threads. All access to the serial port goes through Mutex guards.
+unsafe impl Send for FleaTerminal {}
+unsafe impl Sync for FleaTerminal {}
 
 #[cfg(test)]
 mod tests {
