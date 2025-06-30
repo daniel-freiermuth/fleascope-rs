@@ -376,6 +376,16 @@ pub struct FleaProbe {
     cal_3v3: Option<f64>,  // value-diff 0V - 3.3V
 }
 
+impl Clone for FleaProbe {
+    fn clone(&self) -> Self {
+        Self {
+            multiplier: self.multiplier,
+            cal_zero: self.cal_zero,
+            cal_3v3: self.cal_3v3,
+        }
+    }
+}
+
 impl FleaProbe {
     /// Create a new probe with the given multiplier
     pub fn new(multiplier: ProbeType) -> Self {
