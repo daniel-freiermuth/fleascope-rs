@@ -1,4 +1,4 @@
-use crate::serial_terminal::{FleaTerminal, FleaTerminalError};
+use crate::serial_terminal::{IdleFleaTerminal, FleaPreTerminal, FleaTerminalError};
 use std::thread;
 use std::time::Duration;
 
@@ -42,17 +42,16 @@ impl FleaConnector {
         name: Option<&str>,
         port: Option<&str>,
         _read_calibrations: bool,
-    ) -> Result<FleaTerminal, FleaConnectorError> {
-        let mut terminal = if let Some(port) = port {
+    ) -> Result<IdleFleaTerminal, FleaConnectorError> {
+        let terminal = if let Some(port) = port {
             log::debug!("Connecting to FleaScope on port {}", port);
             Self::validate_port(name, port)?;
-            FleaTerminal::new(port)?
+            FleaPreTerminal::new(port)?.initialize().unwrap()
         } else {
             let device_name = name.unwrap_or("FleaScope");
             Self::get_working_serial(device_name)?
         };
 
-        terminal.initialize()?;
         Ok(terminal)
     }
 
@@ -151,20 +150,20 @@ impl FleaConnector {
     }
 
     /// Get a working serial connection, retrying if necessary
-    fn get_working_serial(name: &str) -> Result<FleaTerminal, FleaConnectorError> {
+    fn get_working_serial(name: &str) -> Result<IdleFleaTerminal, FleaConnectorError> {
         loop {
             let port_candidate = Self::get_device_port(name)?;
-            let mut serial = FleaTerminal::new(&port_candidate)?;
+            let serial = FleaPreTerminal::new(&port_candidate)?;
 
             match serial.initialize() {
-                Ok(_) => break Ok(serial),
-                Err(FleaTerminalError::Timeout { .. }) => {
+                Ok(s) => break Ok(s),
+                Err((mut serial, FleaTerminalError::Timeout { .. })) => {
                     log::debug!("Timeout during initialization, sending reset and retrying");
                     let _ = serial.send_reset(); // Ignore errors here
                     thread::sleep(Duration::from_secs(2));
                     continue;
                 }
-                Err(e) => return Err(e.into()),
+                Err((_serial, e)) => return Err(e.into()),
             }
         }
     }

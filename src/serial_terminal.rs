@@ -1,14 +1,15 @@
 use serialport::SerialPort;
-use std::io::{Error, Read, Write};
+use std::io::{Read, Write};
 use std::time::{Duration, Instant};
-use std::sync::Mutex;
 
 #[derive(Debug)]
-pub struct FleaTerminal {
-    serial: Mutex<Box<dyn SerialPort>>,
-    port: String,
+pub struct FleaPreTerminal {
+    serial: Box<dyn SerialPort>,
     prompt: String,
-    initialized: bool,
+}
+
+pub struct IdleFleaTerminal {
+    inner: FleaPreTerminal,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -24,14 +25,11 @@ pub enum FleaTerminalError {
     )]
     Timeout { expected: String, actual: String },
 
-    #[error("Terminal not initialized. Call initialize() first.")]
-    NotInitialized,
-
     #[error("UTF-8 conversion error: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
 }
 
-impl FleaTerminal {
+impl FleaPreTerminal {
     /// Create a new FleaTerminal instance
     pub fn new(port: &str) -> Result<Self, FleaTerminalError> {
         let serial = serialport::new(port, 9600)
@@ -39,10 +37,8 @@ impl FleaTerminal {
             .open()?;
 
         let mut terminal = Self {
-            serial: Mutex::new(serial),
-            port: port.to_string(),
+            serial: serial,
             prompt: "> ".to_string(),
-            initialized: false,
         };
 
         terminal.flush()?;
@@ -50,49 +46,41 @@ impl FleaTerminal {
     }
 
     /// Initialize the terminal connection
-    pub fn initialize(&mut self) -> Result<(), FleaTerminalError> {
+    pub fn initialize(mut self) -> Result<IdleFleaTerminal, (Self, FleaTerminalError)> {
         log::debug!("Connected to FleaScope. Sending CTRL-C to reset.");
-        self.send_ctrl_c()?;
+        match self.send_ctrl_c() {
+            Ok(_) => {}
+            Err(e) => return Err((self, e)),
+        };
 
         log::debug!("Turning on prompt");
-        self.exec_internal("prompt on", Some(Duration::from_secs(1)))?;
+        match self.exec("prompt on", Some(Duration::from_secs(1))) {
+            Err(e) => return Err((self, e)),
+            Ok(_) => {},
+        };
 
-        self.initialized = true;
-        self.flush()?;
-        Ok(())
+        match self.flush() {
+            Err(e) => return Err((self, e)),
+            Ok(_) => {},
+        };
+        Ok(IdleFleaTerminal { inner: self })
     }
 
     /// Flush the serial buffer
     fn flush(&mut self) -> Result<(), FleaTerminalError> {
-        let serial = self.serial.lock().expect("Failed to lock serial"); 
-        serial.clear(serialport::ClearBuffer::All)?;
+        self.serial.clear(serialport::ClearBuffer::All)?;
         Ok(())
     }
 
-    /// Execute a command (public interface)
-    pub fn exec(
-        &self,
-        command: &str,
-        timeout: Option<Duration>,
-    ) -> Result<String, FleaTerminalError> {
-        if !self.initialized {
-            return Err(FleaTerminalError::NotInitialized);
-        }
-        self.exec_internal(command, timeout)
-    }
-
-    fn exec_internal(
-        &self,
+    fn exec(
+        &mut self,
         command: &str,
         timeout: Option<Duration>,
     ) -> Result<String, FleaTerminalError> {
         {
-            // Lock the serial port for exclusive access
-            let mut serial = self.serial.lock().expect("Failed to lock serial port");
-
             // Send command
             let command_with_newline = format!("{}\n", command);
-            serial.write_all(command_with_newline.as_bytes())?;
+            self.serial.write_all(command_with_newline.as_bytes())?;
 
         }
 
@@ -104,7 +92,7 @@ impl FleaTerminal {
 
         loop {
             let mut byte = [0u8; 1];
-            match self.serial.lock().expect("Failed to lock serial port").read_exact(&mut byte) {
+            match self.serial.read_exact(&mut byte) {
                 Ok(_) => {
                     response.push(byte[0]);
                     window.push(byte[0]);
@@ -148,61 +136,122 @@ impl FleaTerminal {
     }
 
     /// Send CTRL-C character
-    pub fn send_ctrl_c(&self) -> Result<(), FleaTerminalError> {
-        let mut serial = self.serial.lock().expect("Failed to lock serial console");
-        serial.write_all(&[0x03])?;
+    pub fn send_ctrl_c(&mut self) -> Result<(), FleaTerminalError> {
+        self.serial.write_all(&[0x03])?;
         Ok(())
     }
 
     /// Send reset command
-    pub fn send_reset(&self) -> Result<(), FleaTerminalError> {
-        let mut serial = self.serial.lock().expect("Failed to lock serial terminal");
-        serial.write_all(b"reset\n")?;
+    pub fn send_reset(&mut self) -> Result<(), FleaTerminalError> {
+        self.serial.write_all(b"reset\n")?;
         Ok(())
-    }
-
-    /// Check if the terminal is initialized
-    pub fn is_initialized(&self) -> bool {
-        self.initialized
     }
 }
 
-// SAFETY: FleaTerminal uses Mutex internally which provides thread safety
-// The SerialPort trait object is protected by Mutex, making it safe to share
-// across threads. All access to the serial port goes through Mutex guards.
-unsafe impl Send for FleaTerminal {}
-unsafe impl Sync for FleaTerminal {}
+impl IdleFleaTerminal {
+    pub fn exec_async(
+        mut self,
+        command: &str,
+    ) -> BusyFleaTerminal {
+        let command_with_newline = format!("{}\n", command);
+        self.inner.serial.write_all(command_with_newline.as_bytes()).expect("Failed to write command to serial port");
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+        let prompt_bytes = self.inner.prompt.as_bytes().to_vec();
 
-    #[test]
-    fn test_flea_terminal_creation() {
-        // This test will fail if no serial port is available, which is expected in CI
-        // In a real test environment, you would use a mock serial port
-        let result = FleaTerminal::new("/dev/null");
-        // We can't easily test this without a real or mock serial port
-        // but we can at least verify the error handling works
-        match result {
-            Ok(_) => {
-                // If /dev/null works as a serial port on this system, that's fine
-            }
-            Err(FleaTerminalError::SerialPort(_)) => {
-                // Expected when /dev/null is not a valid serial port
-            }
-            Err(e) => {
-                panic!("Unexpected error type: {:?}", e);
+        BusyFleaTerminal {
+            inner: self.inner,
+            response: Vec::new(),
+            prompt_bytes,
+            window: Vec::new(),
+            start: Instant::now(),
+            done: false,
+        }
+    }
+    pub fn exec_sync(
+        &mut self,
+        command: &str,
+        timeout: Option<Duration>,
+    ) -> String {
+        self.inner.exec(command, timeout).expect("Failed to execute command")
+    }
+}
+pub struct BusyFleaTerminal {
+    inner: FleaPreTerminal,
+    response: Vec<u8>,
+    prompt_bytes: Vec<u8>,
+    window: Vec<u8>,
+    start: Instant,
+    done: bool,
+}
+
+impl BusyFleaTerminal {
+    pub fn wait(mut self) -> (String, IdleFleaTerminal) {
+        loop {
+            if self.try_get() {
+                return self.generate_result();
             }
         }
     }
 
-    #[test]
-    fn test_not_initialized_error() {
-        // Test that we get proper error when trying to exec before initialize
-        if let Ok(mut terminal) = FleaTerminal::new("/dev/null") {
-            let result = terminal.exec("test command", None);
-            assert!(matches!(result, Err(FleaTerminalError::NotInitialized)));
+    pub fn cancel(&mut self) -> () {
+        self.inner.send_ctrl_c();
+    }
+
+    fn generate_result(self) -> (String, IdleFleaTerminal) {
+        // Remove the prompt from the end and convert to string
+        let response_without_prompt = &self.response[..self.response.len() - self.prompt_bytes.len()];
+        let response_str = String::from_utf8(response_without_prompt.to_vec()).expect("Failed to convert response to string");
+
+        (
+            response_str.trim().to_string(),
+            IdleFleaTerminal { inner: self.inner },
+        )
+    }
+
+    pub fn wait_timeout(mut self, timeout: Duration) -> Result<(String, IdleFleaTerminal), (BusyFleaTerminal, FleaTerminalError)> {
+        loop {
+            if self.try_get() {
+                return Ok(self.generate_result());
+            }
+
+            if self.start.elapsed() >= timeout {
+                let _response_str = String::from_utf8_lossy(&self.response);
+                let actual_ending = if self.response.len() >= 2 {
+                    String::from_utf8_lossy(&self.response[self.response.len() - 2..]).to_string()
+                } else {
+                    String::from_utf8_lossy(&self.response).to_string()
+                };
+
+                let expected = self.inner.prompt.clone();
+                return Err((self, FleaTerminalError::Timeout {
+                    expected,
+                    actual: actual_ending,
+                }));
+            }
         }
+    }
+
+    pub fn try_get(&mut self) -> bool {
+        while !self.done {
+            let mut byte = [0u8; 1];
+            match self.inner.serial.read_exact(&mut byte) {
+                Ok(_) => {
+                    self.response.push(byte[0]);
+                    self.window.push(byte[0]);
+
+                    if self.window.len() > self.prompt_bytes.len() {
+                        self.window.remove(0);
+                    }
+
+                    if self.window.len() == self.prompt_bytes.len() && self.window == self.prompt_bytes {
+                        self.done = true;
+                    }
+                }
+                Err(_e) => {
+                    break;
+                }
+            }
+        }
+        self.done
     }
 }
