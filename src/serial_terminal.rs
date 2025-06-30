@@ -33,7 +33,7 @@ impl FleaPreTerminal {
     /// Create a new FleaTerminal instance
     pub fn new(port: &str) -> Result<Self, FleaTerminalError> {
         let serial = serialport::new(port, 9600)
-            .timeout(Duration::from_millis(10))
+            .timeout(Duration::from_millis(70))
             .open()?;
 
         let mut terminal = Self {
