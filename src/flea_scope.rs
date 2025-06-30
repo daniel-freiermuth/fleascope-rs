@@ -109,6 +109,9 @@ impl ReadingFleaScope {
         };
         (scope, self.effective_msps, data)
     }
+    pub fn is_done(&mut self) -> bool {
+        self.serial.try_get()
+    }
     pub fn cancel(&mut self) {
         self.serial.cancel();
     }
