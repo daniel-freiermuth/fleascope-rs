@@ -144,7 +144,7 @@ impl FleaScope {
 
     /// Read data with unified trigger (supports both analog and digital triggers)
     pub fn read(
-        &mut self,
+        &self,
         probe: ProbeType,
         time_frame: Duration,
         trigger: Option<Trigger>,
@@ -218,7 +218,7 @@ impl FleaScope {
 
     /// Raw data read from the oscilloscope
     pub fn raw_read(
-        &mut self,
+        &self,
         time_frame: Duration,
         trigger_fields: &str,
         delay: Option<Duration>,
@@ -337,7 +337,7 @@ impl FleaScope {
     }
 
     /// Send CTRL-C to unblock the device
-    pub fn unblock(&mut self) -> Result<(), FleaScopeError> {
+    pub fn unblock(&self) -> Result<(), FleaScopeError> {
         self.serial.send_ctrl_c()?;
         Ok(())
     }
@@ -709,3 +709,10 @@ mod tests {
         assert!(probe.raw_to_voltage(3048.0.into()).is_ok());
     }
 }
+
+// SAFETY: FleaScope is thread-safe because:
+// - FleaTerminal is now thread-safe (implements Send + Sync)  
+// - All other fields are either immutable after construction or contain only basic types
+// - String, FleaProbe are Send + Sync by default
+unsafe impl Send for FleaScope {}
+unsafe impl Sync for FleaScope {}
