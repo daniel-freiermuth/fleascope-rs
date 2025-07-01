@@ -5,7 +5,7 @@ pub enum BitState {
     DontCare,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DigitalTriggerBehavior {
     Auto,
     While,
@@ -24,7 +24,7 @@ impl DigitalTriggerBehavior {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AnalogTriggerBehavior {
     Auto,
     Level,
@@ -129,8 +129,8 @@ impl Default for BitTriggerBuilder {
 
 #[derive(Debug, Clone)]
 pub struct DigitalTrigger {
-    bit_states: [BitState; 9],
-    behavior: DigitalTriggerBehavior,
+    pub bit_states: [BitState; 9],
+    pub behavior: DigitalTriggerBehavior,
 }
 
 impl DigitalTrigger {
@@ -202,8 +202,8 @@ impl Default for AnalogTriggerBuilder {
 
 #[derive(Debug, Clone)]
 pub struct AnalogTrigger {
-    level: f64,
-    behavior: AnalogTriggerBehavior,
+    pub level: f64,
+    pub behavior: AnalogTriggerBehavior,
 }
 
 impl AnalogTrigger {

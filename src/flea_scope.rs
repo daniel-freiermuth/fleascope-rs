@@ -19,7 +19,7 @@ impl ProbeType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Copy)]
 pub enum Waveform {
     Sine,
     Square,
@@ -360,14 +360,12 @@ impl IdleFleaScope {
         self.hostname = hostname.to_string();
         Ok(())
     }
-}
-/*
-impl Drop for IdleFleaScope {
-    fn drop(&mut self) {
+
+    pub fn teardown(mut self) {
         let _ = self.serial.exec_sync("echo on", None);
         let _ = self.serial.exec_sync("prompt on", None);
     }
-} */
+}
 
 #[derive(Debug)]
 pub struct FleaProbe {
@@ -467,7 +465,7 @@ impl FleaProbe {
     /// Write calibration values to flash
     pub fn write_calibration_to_flash(
         &self,
-        serial: &mut IdleFleaTerminal,
+        scope: &mut IdleFleaScope,
     ) -> Result<(), FleaScopeError> {
         let cal_zero = self.cal_zero.ok_or(FleaScopeError::CalibrationNotSet)?;
         let cal_3v3 = self.cal_3v3.ok_or(FleaScopeError::CalibrationNotSet)?;
@@ -475,11 +473,11 @@ impl FleaProbe {
         let zero_value = (cal_zero - 2048.0 + 1000.0 + 0.5) as i32;
         let v3v3_value = (cal_3v3 * self.multiplier.to_multiplier() as f64 + 1000.0 + 0.5) as i32;
 
-        serial.exec_sync(
+        scope.serial.exec_sync(
             &format!("cal_zero_x{} = {}", self.multiplier.to_multiplier(), zero_value),
             None,
         );
-        serial.exec_sync(
+        scope.serial.exec_sync(
             &format!("cal_3v3_x{} = {}", self.multiplier.to_multiplier(), v3v3_value),
             None,
         );
