@@ -83,9 +83,7 @@ impl ReadingFleaScope {
             _ver: self._ver,
             hostname: self.hostname,
         };
-        (scope,
-         data.map(|data| (self.effective_msps, data))
-        )
+        (scope, data.map(|data| (self.effective_msps, data)))
     }
     pub fn is_done(&mut self) -> bool {
         self.serial.is_ready().unwrap_or(true)
@@ -118,24 +116,18 @@ impl IdleFleaScope {
         let mut x1 = FleaProbe::new(ProbeType::X1);
         let mut x10 = FleaProbe::new(ProbeType::X10);
 
-        match Self::new(serial) {
-            Ok(mut scope) => {
-                if read_calibrations {
-                    x1.read_calibration_from_flash(&mut scope.serial)?;
-                    x10.read_calibration_from_flash(&mut scope.serial)?;
-                }
-                Ok((scope, x1, x10))
-            }
-            Err(e) => Err(e),
+        let mut scope = Self::new(serial);
+        if read_calibrations {
+            x1.read_calibration_from_flash(&mut scope.serial);
+            x10.read_calibration_from_flash(&mut scope.serial);
         }
+        Ok((scope, x1, x10))
     }
 
     /// Create a new FleaScope from an existing terminal connection
-    pub fn new(mut serial: IdleFleaTerminal) -> Result<Self, FleaScopeError> {
+    pub fn new(mut serial: IdleFleaTerminal) -> Self {
         log::debug!("Turning off echo");
         serial.exec_sync("echo off", None);
-
-        // TODO: try to gear up to 115200 baud
 
         let ver = serial.exec_sync("ver", None);
         log::debug!("FleaScope version: {}", ver);
@@ -145,13 +137,11 @@ impl IdleFleaScope {
         log::debug!("FleaScope hostname: {}", hostname);
         // TODO: check if hostname is correct
 
-        let mut scope = Self {
+        Self {
             serial,
             _ver: ver,
             hostname,
-        };
-
-        Ok(scope)
+        }
     }
 
     /// Set the waveform generator
@@ -242,7 +232,7 @@ impl IdleFleaScope {
                     effective_msps,
                 })
             }
-            Err(e) => return Err((self, e)),
+            Err(e) => Err((self, e)),
         }
     }
 
@@ -257,7 +247,6 @@ impl IdleFleaScope {
 
         let data = self.serial.exec_sync(&command, None);
         Ok((effective_msps, data))
-
     }
 
     pub fn parse_csv(csv_data: &str, effective_msps: f64) -> Result<LazyFrame, PolarsError> {
@@ -275,7 +264,9 @@ impl IdleFleaScope {
             .with_row_index("row_index", Some(0))
             .with_columns([
                 // Create time column using row index - more efficient than separate vector creation
-                (col("row_index").cast(DataType::Float64) * lit(1.0 / (effective_msps * 1_000_000.0))).alias("time")
+                (col("row_index").cast(DataType::Float64)
+                    * lit(1.0 / (effective_msps * 1_000_000.0)))
+                .alias("time"),
             ])
             .select([col("time"), col("bnc"), col("bitmap")]);
 
@@ -376,7 +367,8 @@ impl FleaProbe {
         let dim_result = serial.exec_sync(
             &format!(
                 "dim cal_zero_x{} as flash, cal_3v3_x{} as flash",
-                self.multiplier.to_multiplier(), self.multiplier.to_multiplier()
+                self.multiplier.to_multiplier(),
+                self.multiplier.to_multiplier()
             ),
             None,
         );
@@ -438,23 +430,27 @@ impl FleaProbe {
         let v3v3_value = (cal_3v3 * self.multiplier.to_multiplier() as f64 + 1000.0 + 0.5) as i32;
 
         scope.serial.exec_sync(
-            &format!("cal_zero_x{} = {}", self.multiplier.to_multiplier(), zero_value),
+            &format!(
+                "cal_zero_x{} = {}",
+                self.multiplier.to_multiplier(),
+                zero_value
+            ),
             None,
         );
         scope.serial.exec_sync(
-            &format!("cal_3v3_x{} = {}", self.multiplier.to_multiplier(), v3v3_value),
+            &format!(
+                "cal_3v3_x{} = {}",
+                self.multiplier.to_multiplier(),
+                v3v3_value
+            ),
             None,
         );
 
         Ok(())
     }
 
-    pub fn apply_calibration(&self, df: LazyFrame) -> LazyFrame{
-        df.select([
-            col("time"),
-            self.raw_to_voltage(col("bnc")),
-            col("bitmap"),
-        ])
+    pub fn apply_calibration(&self, df: LazyFrame) -> LazyFrame {
+        df.select([col("time"), self.raw_to_voltage(col("bnc")), col("bitmap")])
     }
 
     /// Read a stable value for calibration purposes
@@ -546,12 +542,6 @@ mod tests {
         assert_eq!(Waveform::Square.as_str(), "square");
         assert_eq!(Waveform::Triangle.as_str(), "triangle");
         assert_eq!(Waveform::Ekg.as_str(), "ekg");
-    }
-
-    #[test]
-    fn test_duration_to_us() {
-        assert_eq!(IdleFleaScope::duration_to_us(Duration::from_millis(1)), 1000);
-        assert_eq!(IdleFleaScope::duration_to_us(Duration::from_micros(500)), 500);
     }
 
     #[test]

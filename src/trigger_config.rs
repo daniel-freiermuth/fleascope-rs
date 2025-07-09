@@ -186,10 +186,6 @@ impl DigitalTrigger {
 pub struct AnalogTriggerBuilder;
 
 impl AnalogTriggerBuilder {
-    pub fn new() -> Self {
-        Self
-    }
-
     pub fn rising_edge(&self, volts: f64) -> AnalogTrigger {
         AnalogTrigger::new(volts, AnalogTriggerBehavior::Rising)
     }
@@ -208,12 +204,6 @@ impl AnalogTriggerBuilder {
     }
 }
 
-impl Default for AnalogTriggerBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct AnalogTrigger {
     pub level: f64,
@@ -226,7 +216,7 @@ impl AnalogTrigger {
     }
 
     pub fn start_capturing_when() -> AnalogTriggerBuilder {
-        AnalogTriggerBuilder::new()
+        AnalogTriggerBuilder {}
     }
 
     pub fn into_trigger_fields<F>(

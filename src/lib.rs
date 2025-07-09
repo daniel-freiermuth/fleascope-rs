@@ -123,8 +123,8 @@ pub use trigger_config::{
     DigitalTrigger, DigitalTriggerBehavior, Trigger,
 };
 
-pub use serial_terminal::{IdleFleaTerminal, FleaPreTerminal, FleaTerminalError};
+pub use serial_terminal::{FleaPreTerminal, FleaTerminalError, IdleFleaTerminal};
 
 pub use flea_connector::{FleaConnector, FleaConnectorError, FleaDevice};
 
-pub use flea_scope::{FleaProbe, IdleFleaScope, FleaScopeError, ProbeType, Waveform};
+pub use flea_scope::{FleaProbe, IdleFleaScope, ProbeType, Waveform};

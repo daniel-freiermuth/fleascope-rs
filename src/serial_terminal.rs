@@ -42,7 +42,7 @@ impl FleaPreTerminal {
             .open()?;
 
         let mut terminal = Self {
-            serial: serial,
+            serial,
             prompt: "> ".to_string(),
         };
 
@@ -59,14 +59,12 @@ impl FleaPreTerminal {
         };
 
         log::debug!("Turning on prompt");
-        match self.exec("prompt on", Some(Duration::from_secs(1))) {
-            Err(e) => return Err((self, e)),
-            Ok(_) => {},
+        if let Err(e) = self.exec("prompt on", Some(Duration::from_secs(1))) {
+            return Err((self, e));
         };
 
-        match self.flush() {
-            Err(e) => return Err((self, e)),
-            Ok(_) => {},
+        if let Err(e) = self.flush() {
+            return Err((self, e));
         };
         Ok(IdleFleaTerminal { inner: self })
     }
@@ -86,7 +84,6 @@ impl FleaPreTerminal {
             // Send command
             let command_with_newline = format!("{}\n", command);
             self.serial.write_all(command_with_newline.as_bytes())?;
-
         }
 
         // Read response until prompt
@@ -112,24 +109,22 @@ impl FleaPreTerminal {
                         break;
                     }
                 }
-                Err(_e) => {
-                    match timeout {
-                        Some(t) if now.elapsed() >= t => {
-                            let _response_str = String::from_utf8_lossy(&response);
-                            let actual_ending = if response.len() >= 2 {
-                                String::from_utf8_lossy(&response[response.len() - 2..]).to_string()
-                            } else {
-                                String::from_utf8_lossy(&response).to_string()
-                            };
+                Err(_e) => match timeout {
+                    Some(t) if now.elapsed() >= t => {
+                        let _response_str = String::from_utf8_lossy(&response);
+                        let actual_ending = if response.len() >= 2 {
+                            String::from_utf8_lossy(&response[response.len() - 2..]).to_string()
+                        } else {
+                            String::from_utf8_lossy(&response).to_string()
+                        };
 
-                            return Err(FleaTerminalError::Timeout {
-                                expected: self.prompt.clone(),
-                                actual: actual_ending,
-                            });
-                        }
-                        _ => {}
+                        return Err(FleaTerminalError::Timeout {
+                            expected: self.prompt.clone(),
+                            actual: actual_ending,
+                        });
                     }
-                 }
+                    _ => {}
+                },
             }
         }
 
@@ -154,12 +149,12 @@ impl FleaPreTerminal {
 }
 
 impl IdleFleaTerminal {
-    pub fn exec_async(
-        mut self,
-        command: &str,
-    ) -> BusyFleaTerminal {
+    pub fn exec_async(mut self, command: &str) -> BusyFleaTerminal {
         let command_with_newline = format!("{}\n", command);
-        self.inner.serial.write_all(command_with_newline.as_bytes()).expect("Failed to write command to serial port");
+        self.inner
+            .serial
+            .write_all(command_with_newline.as_bytes())
+            .expect("Failed to write command to serial port");
 
         let prompt_bytes = self.inner.prompt.as_bytes().to_vec();
 
@@ -172,12 +167,10 @@ impl IdleFleaTerminal {
             done: false,
         }
     }
-    pub fn exec_sync(
-        &mut self,
-        command: &str,
-        timeout: Option<Duration>,
-    ) -> String {
-        self.inner.exec(command, timeout).expect("Failed to execute command")
+    pub fn exec_sync(&mut self, command: &str, timeout: Option<Duration>) -> String {
+        self.inner
+            .exec(command, timeout)
+            .expect("Failed to execute command")
     }
 }
 pub struct BusyFleaTerminal {
@@ -193,30 +186,29 @@ impl BusyFleaTerminal {
     pub fn wait(mut self) -> (Result<String, ConnectionLostError>, IdleFleaTerminal) {
         loop {
             match self.is_ready() {
-                Ok(ready) => {
-                    if ready {
+                Ok(b) => {
+                    if b {
                         let (str, idlescope) = self.generate_result();
                         return (Ok(str), idlescope);
                     }
                 }
                 Err(e) => {
-                    return (
-                        Err(e),
-                        IdleFleaTerminal { inner: self.inner },
-                    );
+                    return (Err(e), IdleFleaTerminal { inner: self.inner });
                 }
             }
         }
     }
 
-    pub fn cancel(&mut self) -> () {
-        self.inner.send_ctrl_c();
+    pub fn cancel(&mut self) {
+        self.inner.send_ctrl_c().expect("Failed to send CTRL-C");
     }
 
     fn generate_result(self) -> (String, IdleFleaTerminal) {
         // Remove the prompt from the end and convert to string
-        let response_without_prompt = &self.response[..self.response.len() - self.prompt_bytes.len()];
-        let response_str = String::from_utf8(response_without_prompt.to_vec()).expect("Failed to convert response to string");
+        let response_without_prompt =
+            &self.response[..self.response.len() - self.prompt_bytes.len()];
+        let response_str = String::from_utf8(response_without_prompt.to_vec())
+            .expect("Failed to convert response to string");
 
         (
             response_str.trim().to_string(),
@@ -272,7 +264,9 @@ impl BusyFleaTerminal {
                         self.window.remove(0);
                     }
 
-                    if self.window.len() == self.prompt_bytes.len() && self.window == self.prompt_bytes {
+                    if self.window.len() == self.prompt_bytes.len()
+                        && self.window == self.prompt_bytes
+                    {
                         self.done = true;
                     }
                 }

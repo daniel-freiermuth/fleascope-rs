@@ -1,4 +1,4 @@
-use crate::serial_terminal::{IdleFleaTerminal, FleaPreTerminal, FleaTerminalError};
+use crate::serial_terminal::{FleaPreTerminal, FleaTerminalError, IdleFleaTerminal};
 use std::thread;
 use std::time::Duration;
 
@@ -6,12 +6,6 @@ use std::time::Duration;
 pub struct FleaDevice {
     pub name: String,
     pub port: String,
-}
-
-impl FleaDevice {
-    pub fn new(name: String, port: String) -> Self {
-        Self { name, port }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -120,7 +114,10 @@ impl FleaConnector {
                 // Must have a product name and pass validation
                 if let Some(device_name) = usb_info.product.clone() {
                     if Self::validate_device(name_owned.as_deref(), &port_info) {
-                        return Some(FleaDevice::new(device_name, port_info.port_name));
+                        return Some(FleaDevice {
+                            name: device_name,
+                            port: port_info.port_name,
+                        });
                     }
                 }
             }
