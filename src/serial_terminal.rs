@@ -1,5 +1,5 @@
 use serialport::SerialPort;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
@@ -11,6 +11,8 @@ pub struct FleaPreTerminal {
 pub struct IdleFleaTerminal {
     inner: FleaPreTerminal,
 }
+
+pub struct ConnectionLostError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FleaTerminalError {
@@ -27,6 +29,9 @@ pub enum FleaTerminalError {
 
     #[error("UTF-8 conversion error: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
+
+    #[error("Connection lost while waiting for response")]
+    ConnectionLost,
 }
 
 impl FleaPreTerminal {
@@ -185,10 +190,21 @@ pub struct BusyFleaTerminal {
 }
 
 impl BusyFleaTerminal {
-    pub fn wait(mut self) -> (String, IdleFleaTerminal) {
+    pub fn wait(mut self) -> (Result<String, ConnectionLostError>, IdleFleaTerminal) {
         loop {
-            if self.try_get() {
-                return self.generate_result();
+            match self.is_ready() {
+                Ok(ready) => {
+                    if ready {
+                        let (str, idlescope) = self.generate_result();
+                        return (Ok(str), idlescope);
+                    }
+                }
+                Err(e) => {
+                    return (
+                        Err(e),
+                        IdleFleaTerminal { inner: self.inner },
+                    );
+                }
             }
         }
     }
@@ -208,10 +224,20 @@ impl BusyFleaTerminal {
         )
     }
 
-    pub fn wait_timeout(mut self, timeout: Duration) -> Result<(String, IdleFleaTerminal), (BusyFleaTerminal, FleaTerminalError)> {
+    pub fn wait_timeout(
+        mut self,
+        timeout: Duration,
+    ) -> Result<(String, IdleFleaTerminal), (BusyFleaTerminal, FleaTerminalError)> {
         loop {
-            if self.try_get() {
-                return Ok(self.generate_result());
+            match self.is_ready() {
+                Ok(done) => {
+                    if done {
+                        return Ok(self.generate_result());
+                    }
+                }
+                Err(_e) => {
+                    return Err((self, FleaTerminalError::ConnectionLost));
+                }
             }
 
             if self.start.elapsed() >= timeout {
@@ -223,15 +249,18 @@ impl BusyFleaTerminal {
                 };
 
                 let expected = self.inner.prompt.clone();
-                return Err((self, FleaTerminalError::Timeout {
-                    expected,
-                    actual: actual_ending,
-                }));
+                return Err((
+                    self,
+                    FleaTerminalError::Timeout {
+                        expected,
+                        actual: actual_ending,
+                    },
+                ));
             }
         }
     }
 
-    pub fn try_get(&mut self) -> bool {
+    pub fn is_ready(&mut self) -> Result<bool, ConnectionLostError> {
         while !self.done {
             let mut byte = [0u8; 1];
             match self.inner.serial.read_exact(&mut byte) {
@@ -247,11 +276,21 @@ impl BusyFleaTerminal {
                         self.done = true;
                     }
                 }
-                Err(_e) => {
+                Err(e) if e.kind() == ErrorKind::TimedOut => {
                     break;
+                }
+                Err(e) if e.kind() == ErrorKind::BrokenPipe => {
+                    return Err(ConnectionLostError);
+                }
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                    return Err(ConnectionLostError);
+                }
+                Err(e) => {
+                    tracing::info!("Serial read error (kind: {:?})...{e}", e.kind());
+                    panic!("Serial read error: {}", e);
                 }
             }
         }
-        self.done
+        Ok(self.done)
     }
 }

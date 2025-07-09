@@ -76,17 +76,19 @@ pub struct ReadingFleaScope {
 }
 
 impl ReadingFleaScope {
-    pub fn wait(self) -> (IdleFleaScope, f64, String) {
+    pub fn wait(self) -> (IdleFleaScope, Result<(f64, String), ConnectionLostError>) {
         let (data, serial) = self.serial.wait();
         let scope = IdleFleaScope {
             serial,
             _ver: self._ver,
             hostname: self.hostname,
         };
-        (scope, self.effective_msps, data)
+        (scope,
+         data.map(|data| (self.effective_msps, data))
+        )
     }
     pub fn is_done(&mut self) -> bool {
-        self.serial.try_get()
+        self.serial.is_ready().unwrap_or(true)
     }
     pub fn cancel(&mut self) {
         self.serial.cancel();
