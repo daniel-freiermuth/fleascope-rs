@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 serialport = "4.0"
 log = "0.4"
+tracing = "0.1"
 thiserror = "1.0"
 polars = { version = "0.45", features = ["lazy", "csv", "strings"] }
 
