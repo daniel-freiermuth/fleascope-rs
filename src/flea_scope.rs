@@ -103,10 +103,10 @@ pub struct IdleFleaScope {
 
 impl IdleFleaScope {
     // Constants
-    const MSPS: f64 = 18.0; // Million samples per second. target sample rate
+    const MSPS: u32 = 18; // Million samples per second. target sample rate
     const MCU_MHZ: f64 = 120.0; // MCU clock frequency in MHz, used for calculations
-    const INTERLEAVE: f64 = 5.0; // number of ADCs interleaved
-    const TOTAL_SAMPLES: f64 = 2000.0;
+    const INTERLEAVE: u32 = 5; // number of ADCs interleaved
+    const TOTAL_SAMPLES: u32 = 2000;
 
     /// Connect to a FleaScope device
     pub fn connect(
@@ -156,19 +156,16 @@ impl IdleFleaScope {
 
     /// Set the waveform generator
     pub fn set_waveform(&mut self, waveform: Waveform, hz: i32) {
-        self.serial.exec_sync(&format!("wave {} {}", waveform.as_str(), hz), None);
-    }
-
-    /// Convert Duration to microseconds
-    fn duration_to_us(duration: Duration) -> u64 {
-        duration.as_micros() as u64
+        self.serial
+            .exec_sync(&format!("wave {} {}", waveform.as_str(), hz), None);
     }
 
     /// Convert number1 to prescaler value
     fn number1_to_prescaler(number1: u32) -> Result<u32, CaptureConfigError> {
         let ps = if number1 > 1000 { 16 } else { 1 };
-        let t = ((Self::MCU_MHZ * number1 as f64 * Self::INTERLEAVE / ps as f64 / Self::MSPS) + 0.5)
-            as i32;
+        let t =
+            ((Self::MCU_MHZ * (number1 * Self::INTERLEAVE) as f64 / ps as f64 / Self::MSPS as f64)
+                + 0.5) as u32;
 
         if t == 0 {
             return Err(CaptureConfigError::TimeFrameTooSmall);
@@ -181,8 +178,8 @@ impl IdleFleaScope {
     }
 
     /// Convert prescaler to effective MSPS
-    fn prescaler_to_effective_msps(prescaler: i32) -> f64 {
-        Self::MCU_MHZ * Self::INTERLEAVE / prescaler as f64
+    fn prescaler_to_effective_msps(prescaler: u32) -> f64 {
+        Self::MCU_MHZ * Self::INTERLEAVE as f64 / prescaler as f64
     }
 
     fn prepare_read_command(
@@ -205,17 +202,15 @@ impl IdleFleaScope {
             return Err(CaptureConfigError::DelayTooLarge);
         }
 
-        let number1 = (Self::MSPS * Self::duration_to_us(time_frame) as f64
-            / Self::TOTAL_SAMPLES) as i32;
-        if number1 <= 0 {
-            return Err(FleaScopeError::InvalidTicksPerSample);
+        let number1 = Self::MSPS * (time_frame.as_micros() as u32) / Self::TOTAL_SAMPLES;
+        if number1 == 0 {
+            return Err(CaptureConfigError::TimeFrameTooSmall);
         }
 
         let prescaler = Self::number1_to_prescaler(number1)?;
         let effective_msps = Self::prescaler_to_effective_msps(prescaler);
 
-        let delay_samples =
-            (Self::duration_to_us(delay) as f64 * effective_msps / 1_000_000.0) as i32;
+        let delay_samples = (delay.as_micros() as f64 * effective_msps) as u32;
         if delay_samples > 1_000_000 {
             return Err(CaptureConfigError::DelayTooLarge);
         }
