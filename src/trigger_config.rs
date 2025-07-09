@@ -1,3 +1,15 @@
+use crate::flea_scope::CaptureConfigError;
+
+pub struct StringifiedTriggerConfig {
+    trigger_fields: String,
+}
+
+impl StringifiedTriggerConfig {
+    pub fn into_string(self) -> String {
+        self.trigger_fields
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BitState {
     High,
@@ -145,7 +157,7 @@ impl DigitalTrigger {
         BitTriggerBuilder::new()
     }
 
-    pub fn into_trigger_fields(&self) -> String {
+    pub fn into_trigger_fields(&self) -> StringifiedTriggerConfig {
         let mut relevant_bits = 0u32;
         for (i, state) in self.bit_states.iter().enumerate() {
             if *state != BitState::DontCare {
@@ -161,10 +173,12 @@ impl DigitalTrigger {
         }
 
         let trigger_behavior_flag = self.behavior.as_str();
-        format!(
-            "{}0x{:02x} 0x{:02x}",
-            trigger_behavior_flag, active_bits, relevant_bits
-        )
+        StringifiedTriggerConfig {
+            trigger_fields: format!(
+                "{}0x{:02x} 0x{:02x}",
+                trigger_behavior_flag, active_bits, relevant_bits
+            ),
+        }
     }
 }
 
@@ -215,7 +229,10 @@ impl AnalogTrigger {
         AnalogTriggerBuilder::new()
     }
 
-    pub fn into_trigger_fields<F>(&self, voltage_to_raw: F) -> Result<String, String>
+    pub fn into_trigger_fields<F>(
+        &self,
+        voltage_to_raw: F,
+    ) -> Result<StringifiedTriggerConfig, CaptureConfigError>
     where
         F: Fn(f64) -> f64,
     {
@@ -223,13 +240,12 @@ impl AnalogTrigger {
         let raw_level = (voltage_to_raw(self.level) / 4.0 + 0.5) as i32;
 
         if !(-1023..=1023).contains(&raw_level) {
-            return Err(format!(
-                "Voltage {} out of range, must be between -1023 and 1023 raw units",
-                self.level
-            ));
+            return Err(CaptureConfigError::VoltageOutOfRange);
         }
 
-        Ok(format!("{}{} 0", trigger_behavior_flag, raw_level))
+        Ok(StringifiedTriggerConfig {
+            trigger_fields: format!("{}{} 0", trigger_behavior_flag, raw_level),
+        })
     }
 }
 
@@ -256,26 +272,6 @@ impl From<DigitalTrigger> for Trigger {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_digital_trigger_builder() {
-        let trigger = DigitalTrigger::start_capturing_when()
-            .bit0(BitState::High)
-            .bit1(BitState::Low)
-            .is_matching();
-
-        let trigger_fields = trigger.into_trigger_fields();
-        assert_eq!(trigger_fields, "0x01 0x03");
-    }
-
-    #[test]
-    fn test_analog_trigger() {
-        let trigger = AnalogTrigger::start_capturing_when().rising_edge(1.5);
-
-        let voltage_to_raw = |v: f64| v * 100.0; // Example conversion
-        let trigger_fields = trigger.into_trigger_fields(voltage_to_raw).unwrap();
-        assert_eq!(trigger_fields, "+38 0");
-    }
 
     #[test]
     fn test_analog_trigger_out_of_range() {

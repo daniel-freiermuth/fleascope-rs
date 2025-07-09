@@ -1,6 +1,6 @@
 use crate::flea_connector::{FleaConnector, FleaConnectorError};
-use crate::serial_terminal::{BusyFleaTerminal, FleaTerminalError, IdleFleaTerminal};
-use crate::trigger_config::{DigitalTrigger, Trigger};
+use crate::serial_terminal::{BusyFleaTerminal, ConnectionLostError, IdleFleaTerminal};
+use crate::trigger_config::{DigitalTrigger, StringifiedTriggerConfig, Trigger};
 use polars::prelude::*;
 use std::time::Duration;
 
@@ -39,57 +39,33 @@ impl Waveform {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum FleaScopeError {
-    #[error("Serial terminal error: {0}")]
-    SerialTerminal(#[from] FleaTerminalError),
-
-    #[error("Connector error: {0}")]
-    Connector(#[from] FleaConnectorError),
-
-    #[error("Polars error: {0}")]
-    Polars(#[from] PolarsError),
-
-    #[error("Time frame cannot be negative")]
-    NegativeTimeFrame,
-
+pub enum CaptureConfigError {
     #[error("Time frame too large (max 3.49 seconds)")]
     TimeFrameTooLarge,
 
     #[error("Time frame too small (min 111 microseconds)")]
     TimeFrameTooSmall,
 
-    #[error("Delay cannot be negative")]
-    NegativeDelay,
-
     #[error("Delay too large (max 1 second)")]
     DelayTooLarge,
 
-    #[error("Delay samples too large (max 1M samples): {samples}")]
-    DelaySamplesTooLarge { samples: i32 },
+    #[error("Voltage out of range")]
+    VoltageOutOfRange,
+}
 
-    #[error("Ticks per sample must be greater than 0")]
-    InvalidTicksPerSample,
+#[derive(Debug, thiserror::Error)]
+pub enum CalibrationError {
+    #[error("No zero calibration available for this probe")]
+    NoZeroCalibrarion,
 
-    #[error("Prescaler must be greater than 0")]
-    InvalidPrescalerLow,
+    #[error("No calibrarion available for this probe")]
+    NoCalibrationPresent,
 
-    #[error("Prescaler must be less than 65536")]
-    InvalidPrescalerHigh,
+    #[error("Signal to unstable")]
+    UnstableSignal,
 
-    #[error("Calibration values are not set")]
-    CalibrationNotSet,
-
-    #[error("Calibration values for probe x{multiplier} are equal ({value})")]
-    CalibrationValuesEqual { multiplier: i32, value: f64 },
-
-    #[error("Zero-Calibration needs to be done first")]
-    ZeroCalibrationRequired,
-
-    #[error("Signal is not stable enough for calibration. Values ranged from {min} to {max}")]
-    SignalNotStable { min: f64, max: f64 },
-
-    #[error("Data parsing error: {0}")]
-    DataParsing(String),
+    #[error("Failure to get calibrartion data")]
+    CalibrationDataError(#[from] PolarsError),
 }
 
 pub struct ReadingFleaScope {
@@ -135,7 +111,7 @@ impl IdleFleaScope {
         name: Option<&str>,
         port: Option<&str>,
         read_calibrations: bool,
-    ) -> Result<(Self, FleaProbe, FleaProbe), FleaScopeError> {
+    ) -> Result<(Self, FleaProbe, FleaProbe), FleaConnectorError> {
         let serial = FleaConnector::connect(name, port, true)?;
         let mut x1 = FleaProbe::new(ProbeType::X1);
         let mut x10 = FleaProbe::new(ProbeType::X10);
@@ -187,16 +163,16 @@ impl IdleFleaScope {
     }
 
     /// Convert number1 to prescaler value
-    fn number1_to_prescaler(number1: i32) -> Result<i32, FleaScopeError> {
+    fn number1_to_prescaler(number1: u32) -> Result<u32, CaptureConfigError> {
         let ps = if number1 > 1000 { 16 } else { 1 };
         let t = ((Self::MCU_MHZ * number1 as f64 * Self::INTERLEAVE / ps as f64 / Self::MSPS) + 0.5)
             as i32;
 
-        if t <= 0 {
-            return Err(FleaScopeError::InvalidPrescalerLow);
+        if t == 0 {
+            return Err(CaptureConfigError::TimeFrameTooSmall);
         }
         if t > 65535 {
-            return Err(FleaScopeError::InvalidPrescalerHigh);
+            return Err(CaptureConfigError::TimeFrameTooLarge);
         }
 
         Ok(ps * t)
@@ -209,28 +185,22 @@ impl IdleFleaScope {
 
     fn prepare_read_command(
         time_frame: Duration,
-        trigger_fields: &str,
+        trigger_fields: StringifiedTriggerConfig,
         delay: Option<Duration>,
-    ) -> Result<(f64, String), FleaScopeError> {
+    ) -> Result<(f64, String), CaptureConfigError> {
         let delay = delay.unwrap_or(Duration::from_millis(0));
 
         // Validate time frame
-        if time_frame.as_secs_f64() < 0.0 {
-            return Err(FleaScopeError::NegativeTimeFrame);
-        }
         if time_frame.as_secs_f64() > 3.49 {
-            return Err(FleaScopeError::TimeFrameTooLarge);
+            return Err(CaptureConfigError::TimeFrameTooLarge);
         }
         if time_frame.as_secs() == 0 && time_frame.as_micros() < 111 {
-            return Err(FleaScopeError::TimeFrameTooSmall);
+            return Err(CaptureConfigError::TimeFrameTooSmall);
         }
 
         // Validate delay
-        if delay.as_secs_f64() < 0.0 {
-            return Err(FleaScopeError::NegativeDelay);
-        }
         if delay.as_secs_f64() > 1.0 {
-            return Err(FleaScopeError::DelayTooLarge);
+            return Err(CaptureConfigError::DelayTooLarge);
         }
 
         let number1 = (Self::MSPS * Self::duration_to_us(time_frame) as f64
@@ -245,20 +215,26 @@ impl IdleFleaScope {
         let delay_samples =
             (Self::duration_to_us(delay) as f64 * effective_msps / 1_000_000.0) as i32;
         if delay_samples > 1_000_000 {
-            return Err(FleaScopeError::DelaySamplesTooLarge {
-                samples: delay_samples,
-            });
+            return Err(CaptureConfigError::DelayTooLarge);
         }
-        Ok((effective_msps, format!("scope {} {} {}", number1, trigger_fields, delay_samples)))
+        Ok((
+            effective_msps,
+            format!(
+                "scope {} {} {}",
+                number1,
+                trigger_fields.into_string(),
+                delay_samples
+            ),
+        ))
     }
 
     /// Raw data read from the oscilloscope
     pub fn read_async(
         self,
         time_frame: Duration,
-        trigger_fields: &str,
+        trigger_fields: StringifiedTriggerConfig,
         delay: Option<Duration>,
-    ) -> Result<ReadingFleaScope, (IdleFleaScope, FleaScopeError)> {
+    ) -> Result<ReadingFleaScope, (IdleFleaScope, CaptureConfigError)> {
         match Self::prepare_read_command(time_frame, trigger_fields, delay) {
             Ok((effective_msps, command)) => {
                 let data = self.serial.exec_async(&command);
@@ -276,21 +252,18 @@ impl IdleFleaScope {
     pub fn read_sync(
         &mut self,
         time_frame: Duration,
-        trigger_fields: &str,
+        trigger_fields: StringifiedTriggerConfig,
         delay: Option<Duration>,
-    ) -> Result<(f64, String), FleaScopeError> {
-
-        let (effective_msps, command) = Self::prepare_read_command(time_frame, trigger_fields, delay)?;
+    ) -> Result<(f64, String), CaptureConfigError> {
+        let (effective_msps, command) =
+            Self::prepare_read_command(time_frame, trigger_fields, delay)?;
 
         let data = self.serial.exec_sync(&command, None);
         Ok((effective_msps, data))
 
     }
 
-    pub fn parse_csv(
-        csv_data: &str,
-        effective_msps: f64,
-    ) -> Result<LazyFrame, FleaScopeError> {
+    pub fn parse_csv(csv_data: &str, effective_msps: f64) -> Result<LazyFrame, PolarsError> {
         // Parse CSV data using Polars LazyFrames - you're absolutely right!
         // For cases where we might only need one column, LazyFrames provide significant benefits
         let df = CsvReadOptions::default()
@@ -313,11 +286,9 @@ impl IdleFleaScope {
     }
 
     /// Extract bits from bitmap column
-    pub fn extract_bits(df: &DataFrame) -> Result<DataFrame, FleaScopeError> {
+    pub fn extract_bits(df: &DataFrame) -> Result<DataFrame, PolarsError> {
         let bitmap_column = df.column("bitmap")?;
-        let bitmap_strings = bitmap_column.str().map_err(|_| {
-            FleaScopeError::DataParsing("Bitmap column is not string type".to_string())
-        })?;
+        let bitmap_strings = bitmap_column.str()?;
 
         // Parse hex strings and extract bits
         let mut bit_columns: Vec<Vec<bool>> = vec![Vec::new(); 10];
@@ -355,10 +326,10 @@ impl IdleFleaScope {
     }
 
     /// Set the hostname
-    pub fn set_hostname(&mut self, hostname: &str) -> Result<(), FleaScopeError> {
-        self.serial.exec_sync(&format!("hostname {}", hostname), None);
+    pub fn set_hostname(&mut self, hostname: &str) {
+        self.serial
+            .exec_sync(&format!("hostname {}", hostname), None);
         self.hostname = hostname.to_string();
-        Ok(())
     }
 
     pub fn teardown(mut self) {
@@ -394,18 +365,17 @@ impl FleaProbe {
         }
     }
 
-    pub fn trigger_to_string(&self, trigger: Trigger) -> Result<String, String> {
+    pub fn trigger_to_string(
+        &self,
+        trigger: Trigger,
+    ) -> Result<StringifiedTriggerConfig, CaptureConfigError> {
         match trigger {
             Trigger::Analog(at) => Ok(at.into_trigger_fields(|v| self.voltage_to_raw(v))?),
             Trigger::Digital(dt) => Ok(dt.into_trigger_fields()),
         }
     }
 
-    /// Read calibration values from flash
-    pub fn read_calibration_from_flash(
-        &mut self,
-        serial: &mut IdleFleaTerminal,
-    ) -> Result<(), FleaScopeError> {
+    pub fn read_calibration_from_flash(&mut self, serial: &mut IdleFleaTerminal) {
         let dim_result = serial.exec_sync(
             &format!(
                 "dim cal_zero_x{} as flash, cal_3v3_x{} as flash",
@@ -424,15 +394,21 @@ impl FleaProbe {
         }
 
         let cal_zero_raw: i32 = serial
-            .exec_sync(&format!("print cal_zero_x{}", self.multiplier.to_multiplier()), None)
+            .exec_sync(
+                &format!("print cal_zero_x{}", self.multiplier.to_multiplier()),
+                None,
+            )
             .trim()
             .parse()
-            .map_err(|_| FleaScopeError::CalibrationNotSet)?;
+            .expect("Failed to parse cal_zero_x value");
         let cal_3v3_raw: i32 = serial
-            .exec_sync(&format!("print cal_3v3_x{}", self.multiplier.to_multiplier()), None)
+            .exec_sync(
+                &format!("print cal_3v3_x{}", self.multiplier.to_multiplier()),
+                None,
+            )
             .trim()
             .parse()
-            .map_err(|_| FleaScopeError::CalibrationNotSet)?;
+            .expect("Failed to parse cal_3v3_x value");
 
         self.cal_zero = Some((cal_zero_raw - 1000) as f64 + 2048.0);
         self.cal_3v3 = Some((cal_3v3_raw - 1000) as f64 / self.multiplier.to_multiplier() as f64);
@@ -443,17 +419,6 @@ impl FleaProbe {
             self.cal_zero,
             self.cal_3v3
         );
-
-        if let (Some(zero), Some(v3v3)) = (self.cal_zero, self.cal_3v3) {
-            if (zero - v3v3).abs() < f64::EPSILON {
-                return Err(FleaScopeError::CalibrationValuesEqual {
-                    multiplier: self.multiplier.to_multiplier(),
-                    value: zero,
-                });
-            }
-        }
-
-        Ok(())
     }
 
     /// Set calibration values manually
@@ -466,9 +431,11 @@ impl FleaProbe {
     pub fn write_calibration_to_flash(
         &self,
         scope: &mut IdleFleaScope,
-    ) -> Result<(), FleaScopeError> {
-        let cal_zero = self.cal_zero.ok_or(FleaScopeError::CalibrationNotSet)?;
-        let cal_3v3 = self.cal_3v3.ok_or(FleaScopeError::CalibrationNotSet)?;
+    ) -> Result<(), CalibrationError> {
+        let cal_zero = self
+            .cal_zero
+            .ok_or(CalibrationError::NoCalibrationPresent)?;
+        let cal_3v3 = self.cal_3v3.ok_or(CalibrationError::NoCalibrationPresent)?;
 
         let zero_value = (cal_zero - 2048.0 + 1000.0 + 0.5) as i32;
         let v3v3_value = (cal_3v3 * self.multiplier.to_multiplier() as f64 + 1000.0 + 0.5) as i32;
@@ -497,15 +464,17 @@ impl FleaProbe {
     pub fn read_stable_value_for_calibration(
         &self,
         scope: &mut IdleFleaScope,
-    ) -> Result<f64, FleaScopeError> {
+    ) -> Result<f64, CalibrationError> {
         let trigger_fields = DigitalTrigger::start_capturing_when()
             .is_matching()
             .into_trigger_fields();
 
-        let (emsps, data) = scope.read_sync(Duration::from_millis(20), &trigger_fields, None)?;
+        let (emsps, data) = scope
+            .read_sync(Duration::from_millis(20), trigger_fields, None)
+            .expect("This should not fail, as we are reading a stable value for calibration");
         let df = IdleFleaScope::parse_csv(&data, emsps)?;
 
-        let relevant_data = df.select([col("bnc"),]).collect()?;
+        let relevant_data = df.select([col("bnc")]).collect()?;
         let bnc_series = relevant_data.column("bnc")?;
         let bnc_values: Vec<f64> = bnc_series.f64()?.into_no_null_iter().collect();
 
@@ -513,10 +482,7 @@ impl FleaProbe {
         let max_val = bnc_values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
         if max_val - min_val > 14.0 {
-            return Err(FleaScopeError::SignalNotStable {
-                min: min_val,
-                max: max_val,
-            });
+            return Err(CalibrationError::UnstableSignal);
         }
 
         let mean = bnc_values.iter().sum::<f64>() / bnc_values.len() as f64;
@@ -540,7 +506,7 @@ impl FleaProbe {
     }
 
     /// Calibrate for 0V
-    pub fn calibrate_0(&mut self, scope: &mut IdleFleaScope) -> Result<f64, FleaScopeError> {
+    pub fn calibrate_0(&mut self, scope: &mut IdleFleaScope) -> Result<f64, CalibrationError> {
         // Try to preserve existing 3.3V calibration if available
         let raw_value_3v3 = if let (Some(_), Some(_)) = (self.cal_zero, self.cal_3v3) {
             Some(self.voltage_to_raw(3.3))
@@ -558,10 +524,8 @@ impl FleaProbe {
     }
 
     /// Calibrate for 3.3V
-    pub fn calibrate_3v3(&mut self, scope: &mut IdleFleaScope) -> Result<f64, FleaScopeError> {
-        let cal_zero = self
-            .cal_zero
-            .ok_or(FleaScopeError::ZeroCalibrationRequired)?;
+    pub fn calibrate_3v3(&mut self, scope: &mut IdleFleaScope) -> Result<f64, CalibrationError> {
+        let cal_zero = self.cal_zero.ok_or(CalibrationError::NoZeroCalibrarion)?;
 
         let raw_3v3 = self.read_stable_value_for_calibration(scope)?;
         self.cal_3v3 = Some(raw_3v3 - cal_zero);
