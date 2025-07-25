@@ -27,3 +27,29 @@ puffin = { version = "0.19", optional = true }
 [dev-dependencies]
 env_logger = "0.10"
 clap = { version = "4.0", features = ["derive"] }
+
+# ====== BUILD PROFILES ======
+
+[profile.dev]
+opt-level = 0
+debug = true
+lto = false
+
+[profile.release]
+# Optimized for cargo install and production use
+opt-level = 3           # Maximum optimization
+lto = "fat"             # Full link-time optimization
+codegen-units = 1       # Single codegen unit for best optimization
+panic = "abort"         # Faster execution
+strip = true            # Remove debug symbols
+overflow-checks = false # Faster math for data processing
+debug = false
+
+[profile.release-profile]
+# For profiling in release mode
+inherits = "release"
+lto = "thin"            # Preserve call structure for profiling
+debug = true            # Keep debug symbols
+strip = false           # Keep symbols for stack traces
+codegen-units = 4       # Balance optimization and symbols
+panic = "unwind"        # Better error handling for profiling
