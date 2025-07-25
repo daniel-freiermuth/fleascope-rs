@@ -103,42 +103,68 @@ impl FleaPreTerminal {
         
         let mut response = Vec::new();
         let prompt_bytes = self.prompt.as_bytes();
-        let mut window = Vec::new();
+        let mut read_buffer = [0u8; 1024]; // Read in chunks instead of byte-by-byte
         let now = Instant::now();
 
         loop {
-            let mut byte = [0u8; 1];
-            match self.serial.read_exact(&mut byte) {
-                Ok(_) => {
-                    response.push(byte[0]);
-                    window.push(byte[0]);
-
-                    // Keep window size equal to prompt length
-                    if window.len() > prompt_bytes.len() {
-                        window.remove(0);
-                    }
-
-                    // Check if we found the prompt
-                    if window.len() == prompt_bytes.len() && window == prompt_bytes {
-                        break;
+            #[cfg(feature = "puffin")]
+            puffin::profile_scope!("serial_read_chunk");
+            
+            match self.serial.read(&mut read_buffer) {
+                Ok(bytes_read) if bytes_read > 0 => {
+                    #[cfg(feature = "puffin")]
+                    puffin::profile_scope!("process_chunk_data");
+                    
+                    response.extend_from_slice(&read_buffer[..bytes_read]);
+                    
+                    // Check if we have the prompt at the end
+                    if response.len() >= prompt_bytes.len() {
+                        let potential_prompt = &response[response.len() - prompt_bytes.len()..];
+                        if potential_prompt == prompt_bytes {
+                            break;
+                        }
                     }
                 }
-                Err(_e) => match timeout {
-                    Some(t) if now.elapsed() >= t => {
-                        let _response_str = String::from_utf8_lossy(&response);
-                        let actual_ending = if response.len() >= 2 {
-                            String::from_utf8_lossy(&response[response.len() - 2..]).to_string()
-                        } else {
-                            String::from_utf8_lossy(&response).to_string()
-                        };
+                Ok(_) => {
+                    // No data available, check timeout
+                    if let Some(t) = timeout {
+                        if now.elapsed() >= t {
+                            let _response_str = String::from_utf8_lossy(&response);
+                            let actual_ending = if response.len() >= 2 {
+                                String::from_utf8_lossy(&response[response.len() - 2..]).to_string()
+                            } else {
+                                String::from_utf8_lossy(&response).to_string()
+                            };
 
-                        return Err(FleaTerminalError::Timeout {
-                            expected: self.prompt.clone(),
-                            actual: actual_ending,
-                        });
+                            return Err(FleaTerminalError::Timeout {
+                                expected: self.prompt.clone(),
+                                actual: actual_ending,
+                            });
+                        }
                     }
-                    _ => {}
-                },
+                }
+                Err(e) if e.kind() == ErrorKind::TimedOut => {
+                    // Timeout on read, check overall timeout
+                    if let Some(t) = timeout {
+                        if now.elapsed() >= t {
+                            let _response_str = String::from_utf8_lossy(&response);
+                            let actual_ending = if response.len() >= 2 {
+                                String::from_utf8_lossy(&response[response.len() - 2..]).to_string()
+                            } else {
+                                String::from_utf8_lossy(&response).to_string()
+                            };
+
+                            return Err(FleaTerminalError::Timeout {
+                                expected: self.prompt.clone(),
+                                actual: actual_ending,
+                            });
+                        }
+                    }
+                    // Continue reading if we haven't hit overall timeout
+                }
+                Err(e) => {
+                    return Err(FleaTerminalError::Io(e));
+                }
             }
         }
 
@@ -179,7 +205,6 @@ impl IdleFleaTerminal {
             inner: self.inner,
             response: Vec::new(),
             prompt_bytes,
-            window: Vec::new(),
             start: Instant::now(),
             done: false,
         }
@@ -197,7 +222,6 @@ pub struct BusyFleaTerminal {
     inner: FleaPreTerminal,
     response: Vec<u8>,
     prompt_bytes: Vec<u8>,
-    window: Vec<u8>,
     start: Instant,
     done: bool,
 }
@@ -282,41 +306,51 @@ impl BusyFleaTerminal {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
         
-        while !self.done {
-            #[cfg(feature = "puffin")]
-            puffin::profile_scope!("serial_read_byte");
-            
-            let mut byte = [0u8; 1];
-            match self.inner.serial.read_exact(&mut byte) {
-                Ok(_) => {
-                    self.response.push(byte[0]);
-                    self.window.push(byte[0]);
+        if self.done {
+            return Ok(true);
+        }
+        
+        #[cfg(feature = "puffin")]
+        puffin::profile_scope!("serial_read_chunk");
 
-                    if self.window.len() > self.prompt_bytes.len() {
-                        self.window.remove(0);
-                    }
+        // There are 24000 bytes tranferred right now which takes 24ms at 1 MB/s
+        // Capturing takes about 7ms, transfer around 30ms
+        // Sleeping here leads to larger chunks, but there isn't really a benefit
 
-                    if self.window.len() == self.prompt_bytes.len()
-                        && self.window == self.prompt_bytes
-                    {
+        let mut read_buffer = [0u8; 1024]; // Read in chunks
+        match self.inner.serial.read(&mut read_buffer) {
+            Ok(bytes_read) if bytes_read > 0 => {
+                #[cfg(feature = "puffin")]
+                puffin::profile_scope!("process_chunk_data");
+
+                self.response.extend_from_slice(&read_buffer[..bytes_read]);
+                
+                // Check if we have the prompt at the end
+                if self.response.len() >= self.prompt_bytes.len() {
+                    let potential_prompt = &self.response[self.response.len() - self.prompt_bytes.len()..];
+                    if potential_prompt == self.prompt_bytes {
                         self.done = true;
                     }
                 }
-                Err(e) if e.kind() == ErrorKind::TimedOut => {
-                    break;
-                }
-                Err(e) if e.kind() == ErrorKind::BrokenPipe => {
-                    return Err(ConnectionLostError);
-                }
-                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-                    return Err(ConnectionLostError);
-                }
-                Err(e) => {
-                    tracing::info!("Serial read error (kind: {:?})...{e}", e.kind());
-                    panic!("Serial read error: {}", e);
-                }
+            }
+            Ok(_) => {
+                // No data available right now, but no error
+            }
+            Err(e) if e.kind() == ErrorKind::TimedOut => {
+                // Timeout is expected in non-blocking reads
+            }
+            Err(e) if e.kind() == ErrorKind::BrokenPipe => {
+                return Err(ConnectionLostError);
+            }
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                return Err(ConnectionLostError);
+            }
+            Err(e) => {
+                tracing::info!("Serial read error (kind: {:?})...{e}", e.kind());
+                panic!("Serial read error: {}", e);
             }
         }
+        
         Ok(self.done)
     }
 }
