@@ -77,6 +77,9 @@ pub struct ReadingFleaScope {
 
 impl ReadingFleaScope {
     pub fn wait(self) -> (IdleFleaScope, Result<(f64, String), ConnectionLostError>) {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         let (data, serial) = self.serial.wait();
         let scope = IdleFleaScope {
             serial,
@@ -86,6 +89,9 @@ impl ReadingFleaScope {
         (scope, data.map(|data| (self.effective_msps, data)))
     }
     pub fn is_done(&mut self) -> bool {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         self.serial.is_ready().unwrap_or(true)
     }
     pub fn cancel(&mut self) {
@@ -177,6 +183,9 @@ impl IdleFleaScope {
         trigger_fields: StringifiedTriggerConfig,
         delay: Option<Duration>,
     ) -> Result<(f64, String), CaptureConfigError> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         let delay = delay.unwrap_or(Duration::from_millis(0));
 
         // Validate time frame
@@ -222,6 +231,9 @@ impl IdleFleaScope {
         trigger_fields: StringifiedTriggerConfig,
         delay: Option<Duration>,
     ) -> Result<ReadingFleaScope, (IdleFleaScope, CaptureConfigError)> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         match Self::prepare_read_command(time_frame, trigger_fields, delay) {
             Ok((effective_msps, command)) => {
                 let data = self.serial.exec_async(&command);
@@ -242,6 +254,9 @@ impl IdleFleaScope {
         trigger_fields: StringifiedTriggerConfig,
         delay: Option<Duration>,
     ) -> Result<(f64, String), CaptureConfigError> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         let (effective_msps, command) =
             Self::prepare_read_command(time_frame, trigger_fields, delay)?;
 
@@ -250,6 +265,9 @@ impl IdleFleaScope {
     }
 
     pub fn parse_csv(csv_data: &str, effective_msps: f64) -> Result<LazyFrame, PolarsError> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         // Parse CSV data using Polars LazyFrames - you're absolutely right!
         // For cases where we might only need one column, LazyFrames provide significant benefits
         let df = CsvReadOptions::default()
@@ -275,6 +293,9 @@ impl IdleFleaScope {
 
     /// Extract bits from bitmap column
     pub fn extract_bits(df: &DataFrame) -> Result<DataFrame, PolarsError> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         let bitmap_column = df.column("bitmap")?;
         let bitmap_strings = bitmap_column.str()?;
 
@@ -357,6 +378,9 @@ impl FleaProbe {
         &self,
         trigger: Trigger,
     ) -> Result<StringifiedTriggerConfig, CaptureConfigError> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         match trigger {
             Trigger::Analog(at) => Ok(at.into_trigger_fields(|v| self.voltage_to_raw(v))?),
             Trigger::Digital(dt) => Ok(dt.into_trigger_fields()),
@@ -450,6 +474,9 @@ impl FleaProbe {
     }
 
     pub fn apply_calibration(&self, df: LazyFrame) -> LazyFrame {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         df.select([col("time"), self.raw_to_voltage(col("bnc")), col("bitmap")])
     }
 

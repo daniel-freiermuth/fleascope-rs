@@ -37,6 +37,9 @@ pub enum FleaTerminalError {
 impl FleaPreTerminal {
     /// Create a new FleaTerminal instance
     pub fn new(port: &str) -> Result<Self, FleaTerminalError> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         let serial = serialport::new(port, 9600)
             .timeout(Duration::from_millis(70))
             .open()?;
@@ -52,6 +55,9 @@ impl FleaPreTerminal {
 
     /// Initialize the terminal connection
     pub fn initialize(mut self) -> Result<IdleFleaTerminal, (Self, FleaTerminalError)> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         log::debug!("Connected to FleaScope. Sending CTRL-C to reset.");
         match self.send_ctrl_c() {
             Ok(_) => {}
@@ -80,13 +86,21 @@ impl FleaPreTerminal {
         command: &str,
         timeout: Option<Duration>,
     ) -> Result<String, FleaTerminalError> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         {
+            #[cfg(feature = "puffin")]
+            puffin::profile_scope!("serial_write_command");
             // Send command
             let command_with_newline = format!("{}\n", command);
             self.serial.write_all(command_with_newline.as_bytes())?;
         }
 
         // Read response until prompt
+        #[cfg(feature = "puffin")]
+        puffin::profile_scope!("serial_read_response");
+        
         let mut response = Vec::new();
         let prompt_bytes = self.prompt.as_bytes();
         let mut window = Vec::new();
@@ -150,6 +164,9 @@ impl FleaPreTerminal {
 
 impl IdleFleaTerminal {
     pub fn exec_async(mut self, command: &str) -> BusyFleaTerminal {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         let command_with_newline = format!("{}\n", command);
         self.inner
             .serial
@@ -168,6 +185,9 @@ impl IdleFleaTerminal {
         }
     }
     pub fn exec_sync(&mut self, command: &str, timeout: Option<Duration>) -> String {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         self.inner
             .exec(command, timeout)
             .expect("Failed to execute command")
@@ -184,6 +204,9 @@ pub struct BusyFleaTerminal {
 
 impl BusyFleaTerminal {
     pub fn wait(mut self) -> (Result<String, ConnectionLostError>, IdleFleaTerminal) {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         loop {
             match self.is_ready() {
                 Ok(b) => {
@@ -204,6 +227,9 @@ impl BusyFleaTerminal {
     }
 
     fn generate_result(self) -> (String, IdleFleaTerminal) {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         // Remove the prompt from the end and convert to string
         let response_without_prompt =
             &self.response[..self.response.len() - self.prompt_bytes.len()];
@@ -253,7 +279,13 @@ impl BusyFleaTerminal {
     }
 
     pub fn is_ready(&mut self) -> Result<bool, ConnectionLostError> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        
         while !self.done {
+            #[cfg(feature = "puffin")]
+            puffin::profile_scope!("serial_read_byte");
+            
             let mut byte = [0u8; 1];
             match self.inner.serial.read_exact(&mut byte) {
                 Ok(_) => {
