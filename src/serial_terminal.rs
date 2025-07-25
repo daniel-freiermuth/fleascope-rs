@@ -316,6 +316,14 @@ impl BusyFleaTerminal {
         // There are 24000 bytes tranferred right now which takes 24ms at 1 MB/s
         // Capturing takes about 7ms, transfer around 30ms
         // Sleeping here leads to larger chunks, but there isn't really a benefit
+        // Timing: capture time,
+        //     7ms whatever on device (increasing with capture time),
+        //     30ms transfer
+        // Possible improvements:
+        // - Fix whatever takes so long on the device. Should be faster than 7ms
+        // - Fix whatever takes increasing amount of time on the device
+        // - Improve transfer speed by • encoding as bytes, • drop digital channels?
+        // - Live sending of data. Seems like data is way faster than data transfer
 
         let mut read_buffer = [0u8; 1024]; // Read in chunks
         match self.inner.serial.read(&mut read_buffer) {
