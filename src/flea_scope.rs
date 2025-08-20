@@ -151,26 +151,39 @@ pub struct ReadingFleaScope {
 }
 
 impl ReadingFleaScope {
-    pub fn wait(self) -> (IdleFleaScope, Result<(f64, String), ConnectionLostError>) {
+    pub fn is_done(
+        mut self,
+    ) -> Result<Result<(IdleFleaScope, ScopeReading), ReadingFleaScope>, ConnectionLostError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-        
-        let (data, serial) = self.serial.wait();
-        let scope = IdleFleaScope {
-            serial,
+
+        match self.serial.is_ready() {
+            Ok(r) => match r {
+                Ok((data, idle_terminal)) => Ok(Ok((
+                    IdleFleaScope {
+                        serial: idle_terminal,
+                        _ver: self._ver,
+                        hostname: self.hostname,
+                    },
+                    ScopeReading {
+                        effective_msps: self.effective_msps,
+                        data,
+                    },
+                ))),
+                Err(busy_terminal) => {
+                    self.serial = busy_terminal;
+                    Ok(Err(self))
+                }
+            },
+            Err(e) => Err(e),
+        }
+    }
+    pub fn cancel(self) -> IdleFleaScope{
+        let idle_serial = self.serial.cancel();
+        IdleFleaScope { serial: idle_serial,
             _ver: self._ver,
             hostname: self.hostname,
-        };
-        (scope, data.map(|data| (self.effective_msps, data)))
-    }
-    pub fn is_done(&mut self) -> bool {
-        #[cfg(feature = "puffin")]
-        puffin::profile_function!();
-        
-        self.serial.is_ready().unwrap_or(true)
-    }
-    pub fn cancel(&mut self) {
-        self.serial.cancel();
+        }
     }
 }
 
@@ -210,11 +223,12 @@ impl IdleFleaScope {
         log::debug!("Turning off echo");
         serial.exec_sync("echo off", None);
 
-        let ver = serial.exec_sync("ver", None);
+        let ver = String::from_utf8(serial.exec_sync("ver", None)).expect("Failed to read version");
         log::debug!("FleaScope version: {}", ver);
         // TODO: check if version is compatible
 
-        let hostname = serial.exec_sync("hostname", None);
+        let hostname =
+            String::from_utf8(serial.exec_sync("hostname", None)).expect("Failed to read hostname");
         log::debug!("FleaScope hostname: {}", hostname);
         // TODO: check if hostname is correct
 
@@ -260,7 +274,7 @@ impl IdleFleaScope {
     ) -> Result<(f64, String), CaptureConfigError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-        
+
         let delay = delay.unwrap_or(Duration::from_millis(0));
 
         // Validate time frame
@@ -308,7 +322,7 @@ impl IdleFleaScope {
     ) -> Result<ReadingFleaScope, (IdleFleaScope, CaptureConfigError)> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-        
+
         match Self::prepare_read_command(time_frame, trigger_fields, delay) {
             Ok((effective_msps, command)) => {
                 let data = self.serial.exec_async(&command);
@@ -331,7 +345,7 @@ impl IdleFleaScope {
     ) -> Result<ScopeReading, CaptureConfigError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-        
+
         let (effective_msps, command) =
             Self::prepare_read_command(time_frame, trigger_fields, delay)?;
 
@@ -383,14 +397,15 @@ impl FleaProbe {
     }
 
     pub fn read_calibration_from_flash(&mut self, serial: &mut IdleFleaTerminal) {
-        let dim_result = serial.exec_sync(
+        let dim_result = String::from_utf8(serial.exec_sync(
             &format!(
                 "dim cal_zero_x{} as flash, cal_3v3_x{} as flash",
                 self.multiplier.to_multiplier(),
                 self.multiplier.to_multiplier()
             ),
             None,
-        );
+        ))
+        .expect("Failed to read calibration from flash");
 
         let expected_response = format!(
             "var 'cal_zero_x{}' already declared at this scope\r\nvar 'cal_3v3_x{}' already declared at this scope",
@@ -401,22 +416,22 @@ impl FleaProbe {
             log::debug!("Variables for calibration already declared. Reading values.");
         }
 
-        let cal_zero_raw: i32 = serial
-            .exec_sync(
-                &format!("print cal_zero_x{}", self.multiplier.to_multiplier()),
-                None,
-            )
-            .trim()
-            .parse()
-            .expect("Failed to parse cal_zero_x value");
-        let cal_3v3_raw: i32 = serial
-            .exec_sync(
-                &format!("print cal_3v3_x{}", self.multiplier.to_multiplier()),
-                None,
-            )
-            .trim()
-            .parse()
-            .expect("Failed to parse cal_3v3_x value");
+        let cal_zero_raw: i32 = String::from_utf8(serial.exec_sync(
+            &format!("print cal_zero_x{}", self.multiplier.to_multiplier()),
+            None,
+        ))
+        .expect("Failed to read cal_zero_x value")
+        .trim()
+        .parse()
+        .expect("Failed to parse cal_zero_x value");
+        let cal_3v3_raw: i32 = String::from_utf8(serial.exec_sync(
+            &format!("print cal_3v3_x{}", self.multiplier.to_multiplier()),
+            None,
+        ))
+        .expect("Failed to read cal_3v3_x value")
+        .trim()
+        .parse()
+        .expect("Failed to parse cal_3v3_x value");
 
         self.cal_zero = Some((cal_zero_raw - 1000) as f64 + 2048.0);
         self.cal_3v3 = Some((cal_3v3_raw - 1000) as f64 / self.multiplier.to_multiplier() as f64);
@@ -471,7 +486,7 @@ impl FleaProbe {
     pub fn apply_calibration(&self, df: LazyFrame) -> LazyFrame {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-        
+
         df.select([col("time"), self.raw_to_voltage(col("bnc")), col("bitmap")])
     }
 

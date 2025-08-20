@@ -1,11 +1,13 @@
 use serialport::SerialPort;
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::time::{Duration, Instant};
+
+const PROMPT: &[u8] = b"> ";
 
 #[derive(Debug)]
 pub struct FleaPreTerminal {
     serial: Box<dyn SerialPort>,
-    prompt: String,
 }
 
 pub struct IdleFleaTerminal {
@@ -22,13 +24,8 @@ pub enum FleaTerminalError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error(
-        "Timeout error: Expected prompt '{expected}' but got '{actual}'. Likely due to a timeout."
-    )]
-    Timeout { expected: String, actual: String },
-
-    #[error("UTF-8 conversion error: {0}")]
-    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("Timeout error: Expected prompt within {timeout:?}.")]
+    Timeout { timeout: Duration },
 
     #[error("Connection lost while waiting for response")]
     ConnectionLost,
@@ -39,15 +36,12 @@ impl FleaPreTerminal {
     pub fn new(port: &str) -> Result<Self, FleaTerminalError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-        
+
         let serial = serialport::new(port, 9600)
             .timeout(Duration::from_millis(70))
             .open()?;
 
-        let mut terminal = Self {
-            serial,
-            prompt: "> ".to_string(),
-        };
+        let mut terminal = Self { serial };
 
         terminal.flush()?;
         Ok(terminal)
@@ -57,7 +51,7 @@ impl FleaPreTerminal {
     pub fn initialize(mut self) -> Result<IdleFleaTerminal, (Self, FleaTerminalError)> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-        
+
         log::debug!("Connected to FleaScope. Sending CTRL-C to reset.");
         match self.send_ctrl_c() {
             Ok(_) => {}
@@ -65,7 +59,7 @@ impl FleaPreTerminal {
         };
 
         log::debug!("Turning on prompt");
-        if let Err(e) = self.exec("prompt on", Some(Duration::from_secs(1))) {
+        if let Err(e) = self.exec_sync("prompt on", Some(Duration::from_secs(1))) {
             return Err((self, e));
         };
 
@@ -81,14 +75,52 @@ impl FleaPreTerminal {
         Ok(())
     }
 
-    fn exec(
+    fn read_chunk(&mut self, response: &mut Vec<u8>) -> Result<bool, ConnectionLostError> {
+        let mut read_buffer = [0u8; 1024]; // Read in chunks
+        match self.serial.read(&mut read_buffer) {
+            Ok(bytes_read) if bytes_read > 0 => {
+                #[cfg(feature = "puffin")]
+                puffin::profile_scope!("process_chunk_data", format!("{}", bytes_read));
+
+                response.extend_from_slice(&read_buffer[..bytes_read]);
+
+                // Check if we have the prompt at the end
+                if response.len() >= PROMPT.len() {
+                    let potential_prompt = &response[response.len() - PROMPT.len()..];
+                    if potential_prompt == PROMPT {
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                } else {
+                    Ok(false)
+                }
+            }
+            Ok(_) => {
+                // No data available right now, but no error
+                Ok(false)
+            }
+            Err(e) if e.kind() == ErrorKind::TimedOut => {
+                // Timeout is expected in non-blocking reads
+                Ok(false)
+            }
+            Err(e) if e.kind() == ErrorKind::BrokenPipe => Err(ConnectionLostError),
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => Err(ConnectionLostError),
+            Err(e) => {
+                tracing::info!("Serial read error (kind: {:?})...{e}", e.kind());
+                panic!("Serial read error: {}", e);
+            }
+        }
+    }
+
+    fn exec_sync(
         &mut self,
         command: &str,
         timeout: Option<Duration>,
-    ) -> Result<String, FleaTerminalError> {
+    ) -> Result<Vec<u8>, FleaTerminalError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-        
+
         {
             #[cfg(feature = "puffin")]
             puffin::profile_scope!("serial_write_command");
@@ -100,79 +132,29 @@ impl FleaPreTerminal {
         // Read response until prompt
         #[cfg(feature = "puffin")]
         puffin::profile_scope!("serial_read_response");
-        
+
         let mut response = Vec::new();
-        let prompt_bytes = self.prompt.as_bytes();
-        let mut read_buffer = [0u8; 1024]; // Read in chunks instead of byte-by-byte
         let now = Instant::now();
 
         loop {
             #[cfg(feature = "puffin")]
             puffin::profile_scope!("serial_read_chunk");
-            
-            match self.serial.read(&mut read_buffer) {
-                Ok(bytes_read) if bytes_read > 0 => {
-                    #[cfg(feature = "puffin")]
-                    puffin::profile_scope!("process_chunk_data");
-                    
-                    response.extend_from_slice(&read_buffer[..bytes_read]);
-                    
-                    // Check if we have the prompt at the end
-                    if response.len() >= prompt_bytes.len() {
-                        let potential_prompt = &response[response.len() - prompt_bytes.len()..];
-                        if potential_prompt == prompt_bytes {
-                            break;
-                        }
-                    }
-                }
-                Ok(_) => {
-                    // No data available, check timeout
-                    if let Some(t) = timeout {
-                        if now.elapsed() >= t {
-                            let _response_str = String::from_utf8_lossy(&response);
-                            let actual_ending = if response.len() >= 2 {
-                                String::from_utf8_lossy(&response[response.len() - 2..]).to_string()
-                            } else {
-                                String::from_utf8_lossy(&response).to_string()
-                            };
-
-                            return Err(FleaTerminalError::Timeout {
-                                expected: self.prompt.clone(),
-                                actual: actual_ending,
-                            });
-                        }
-                    }
-                }
-                Err(e) if e.kind() == ErrorKind::TimedOut => {
-                    // Timeout on read, check overall timeout
-                    if let Some(t) = timeout {
-                        if now.elapsed() >= t {
-                            let _response_str = String::from_utf8_lossy(&response);
-                            let actual_ending = if response.len() >= 2 {
-                                String::from_utf8_lossy(&response[response.len() - 2..]).to_string()
-                            } else {
-                                String::from_utf8_lossy(&response).to_string()
-                            };
-
-                            return Err(FleaTerminalError::Timeout {
-                                expected: self.prompt.clone(),
-                                actual: actual_ending,
-                            });
-                        }
-                    }
-                    // Continue reading if we haven't hit overall timeout
-                }
-                Err(e) => {
-                    return Err(FleaTerminalError::Io(e));
+            match self.read_chunk(&mut response) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(ConnectionLostError) => return Err(FleaTerminalError::ConnectionLost),
+            };
+            if let Some(t) = timeout {
+                if now.elapsed() >= t {
+                    return Err(FleaTerminalError::Timeout { timeout: t });
                 }
             }
         }
 
         // Remove the prompt from the end and convert to string
-        let response_without_prompt = &response[..response.len() - prompt_bytes.len()];
-        let response_str = String::from_utf8(response_without_prompt.to_vec())?;
+        let response_without_prompt = &response[..response.len() - PROMPT.len()];
 
-        Ok(response_str.trim().to_string())
+        Ok(response_without_prompt.to_vec())
     }
 
     /// Send CTRL-C character
@@ -192,124 +174,83 @@ impl IdleFleaTerminal {
     pub fn exec_async(mut self, command: &str) -> BusyFleaTerminal {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-        
+
         let command_with_newline = format!("{}\n", command);
         self.inner
             .serial
             .write_all(command_with_newline.as_bytes())
             .expect("Failed to write command to serial port");
 
-        let prompt_bytes = self.inner.prompt.as_bytes().to_vec();
-
         BusyFleaTerminal {
             inner: self.inner,
             response: Vec::new(),
-            prompt_bytes,
-            start: Instant::now(),
-            done: false,
         }
     }
-    pub fn exec_sync(&mut self, command: &str, timeout: Option<Duration>) -> String {
+    pub fn exec_sync(&mut self, command: &str, timeout: Option<Duration>) -> Vec<u8> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-        
+
         self.inner
-            .exec(command, timeout)
+            .exec_sync(command, timeout)
             .expect("Failed to execute command")
     }
 }
 pub struct BusyFleaTerminal {
     inner: FleaPreTerminal,
     response: Vec<u8>,
-    prompt_bytes: Vec<u8>,
-    start: Instant,
-    done: bool,
 }
 
 impl BusyFleaTerminal {
-    pub fn wait(mut self) -> (Result<String, ConnectionLostError>, IdleFleaTerminal) {
-        #[cfg(feature = "puffin")]
-        puffin::profile_function!();
-        
-        loop {
-            match self.is_ready() {
-                Ok(b) => {
-                    if b {
-                        let (str, idlescope) = self.generate_result();
-                        return (Ok(str), idlescope);
-                    }
-                }
-                Err(e) => {
-                    return (Err(e), IdleFleaTerminal { inner: self.inner });
-                }
-            }
-        }
-    }
-
-    pub fn cancel(&mut self) {
+    pub fn cancel(mut self) -> IdleFleaTerminal {
         self.inner.send_ctrl_c().expect("Failed to send CTRL-C");
-    }
-
-    fn generate_result(self) -> (String, IdleFleaTerminal) {
-        #[cfg(feature = "puffin")]
-        puffin::profile_function!();
-        
-        // Remove the prompt from the end and convert to string
-        let response_without_prompt =
-            &self.response[..self.response.len() - self.prompt_bytes.len()];
-        let response_str = String::from_utf8(response_without_prompt.to_vec())
-            .expect("Failed to convert response to string");
-
-        (
-            response_str.trim().to_string(),
-            IdleFleaTerminal { inner: self.inner },
-        )
-    }
-
-    pub fn wait_timeout(
-        mut self,
-        timeout: Duration,
-    ) -> Result<(String, IdleFleaTerminal), (BusyFleaTerminal, FleaTerminalError)> {
+        const PROMPT_LEN: usize = PROMPT.len();
+        const BUFFER_LEN: usize = 1024;
+        let mut prompt_buffer = VecDeque::with_capacity(PROMPT_LEN);
+        let mut read_buffer = [0u8; BUFFER_LEN];
         loop {
-            match self.is_ready() {
-                Ok(done) => {
-                    if done {
-                        return Ok(self.generate_result());
+            match self.inner.serial.read(&mut read_buffer) {
+                Ok(bytes_read) if bytes_read >= PROMPT_LEN => {
+                    prompt_buffer =
+                        VecDeque::from(read_buffer[bytes_read - PROMPT_LEN..bytes_read].to_vec());
+                }
+                Ok(bytes_read) if bytes_read > 0 => {
+                    for _i in 0..bytes_read {
+                        prompt_buffer.pop_front();
                     }
+                    prompt_buffer.extend(&read_buffer[..bytes_read]);
                 }
-                Err(_e) => {
-                    return Err((self, FleaTerminalError::ConnectionLost));
-                }
+                Ok(_) => continue, // No data available right now, but no error
+                Err(e) if e.kind() == ErrorKind::TimedOut => continue, // Timeout is expected in non-blocking reads
+                Err(e) => panic!("Serial read error: {}", e),
             }
-
-            if self.start.elapsed() >= timeout {
-                let _response_str = String::from_utf8_lossy(&self.response);
-                let actual_ending = if self.response.len() >= 2 {
-                    String::from_utf8_lossy(&self.response[self.response.len() - 2..]).to_string()
-                } else {
-                    String::from_utf8_lossy(&self.response).to_string()
-                };
-
-                let expected = self.inner.prompt.clone();
-                return Err((
-                    self,
-                    FleaTerminalError::Timeout {
-                        expected,
-                        actual: actual_ending,
-                    },
-                ));
+            // Check if we have the prompt at the end
+            if prompt_buffer.len() == PROMPT.len()
+                && prompt_buffer.iter().copied().eq(PROMPT.iter().copied())
+            {
+                break;
             }
         }
+        self.inner.flush().expect("Failed to flush serial port");
+        IdleFleaTerminal { inner: self.inner }
     }
 
-    pub fn is_ready(&mut self) -> Result<bool, ConnectionLostError> {
+    fn into_result(self) -> (Vec<u8>, IdleFleaTerminal) {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-        
-        if self.done {
-            return Ok(true);
-        }
-        
+
+        // Remove the prompt from the end and convert to string
+        let response_without_prompt = &self.response[..self.response.len() - PROMPT.len()];
+        let response_str = response_without_prompt.to_vec();
+
+        (response_str, IdleFleaTerminal { inner: self.inner })
+    }
+
+    pub fn is_ready(
+        mut self,
+    ) -> Result<Result<(Vec<u8>, IdleFleaTerminal), BusyFleaTerminal>, ConnectionLostError> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+
         #[cfg(feature = "puffin")]
         puffin::profile_scope!("serial_read_chunk");
 
@@ -325,40 +266,10 @@ impl BusyFleaTerminal {
         // - Improve transfer speed by • encoding as bytes, • drop digital channels?
         // - Live sending of data. Seems like data is way faster than data transfer
 
-        let mut read_buffer = [0u8; 1024]; // Read in chunks
-        match self.inner.serial.read(&mut read_buffer) {
-            Ok(bytes_read) if bytes_read > 0 => {
-                #[cfg(feature = "puffin")]
-                puffin::profile_scope!("process_chunk_data");
-
-                self.response.extend_from_slice(&read_buffer[..bytes_read]);
-                
-                // Check if we have the prompt at the end
-                if self.response.len() >= self.prompt_bytes.len() {
-                    let potential_prompt = &self.response[self.response.len() - self.prompt_bytes.len()..];
-                    if potential_prompt == self.prompt_bytes {
-                        self.done = true;
-                    }
-                }
-            }
-            Ok(_) => {
-                // No data available right now, but no error
-            }
-            Err(e) if e.kind() == ErrorKind::TimedOut => {
-                // Timeout is expected in non-blocking reads
-            }
-            Err(e) if e.kind() == ErrorKind::BrokenPipe => {
-                return Err(ConnectionLostError);
-            }
-            Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-                return Err(ConnectionLostError);
-            }
-            Err(e) => {
-                tracing::info!("Serial read error (kind: {:?})...{e}", e.kind());
-                panic!("Serial read error: {}", e);
-            }
+        match self.inner.read_chunk(&mut self.response) {
+            Ok(true) => Ok(Ok(self.into_result())),
+            Ok(false) => Ok(Err(self)),
+            Err(ConnectionLostError) => Err(ConnectionLostError),
         }
-        
-        Ok(self.done)
     }
 }
