@@ -1,6 +1,6 @@
 [package]
 name = "fleascope-rs"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Library to interact with a Fleascope"
@@ -20,13 +20,13 @@ puffin = ["dep:puffin"]
 serialport = "4.0"
 log = "0.4"
 tracing = "0.1"
-thiserror = "1.0"
-polars = { version = "0.45", features = ["lazy", "csv", "strings"] }
+thiserror = "2.0"
+polars = { version = "0.49", features = ["lazy", "csv", "strings"] }
 puffin = { version = "0.19", optional = true }
 
 [dev-dependencies]
-env_logger = "0.10"
-clap = { version = "4.0", features = ["derive"] }
+env_logger = "0.11"
+clap = { version = "4.5", features = ["derive"] }
 
 # ====== BUILD PROFILES ======
 
