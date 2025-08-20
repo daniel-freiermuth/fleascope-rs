@@ -188,10 +188,10 @@ impl TriggerConfig for DigitalTrigger {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AnalogTriggerBuilder {
-    volts: f64,
-    behavior: AnalogTriggerBehavior,
+    pub volts: f64,
+    pub behavior: AnalogTriggerBehavior,
 }
 
 impl AnalogTriggerBuilder {
