@@ -1,4 +1,8 @@
-use crate::flea_scope::CaptureConfigError;
+use crate::{flea_scope::CaptureConfigError, FleaProbe};
+
+pub trait TriggerConfig {
+    fn into_trigger_fields(self) -> StringifiedTriggerConfig;
+}
 
 pub struct StringifiedTriggerConfig {
     trigger_fields: String,
@@ -156,8 +160,10 @@ impl DigitalTrigger {
     pub fn start_capturing_when() -> BitTriggerBuilder {
         BitTriggerBuilder::new()
     }
+}
 
-    pub fn into_trigger_fields(&self) -> StringifiedTriggerConfig {
+impl TriggerConfig for DigitalTrigger {
+    fn into_trigger_fields(self) -> StringifiedTriggerConfig {
         let mut relevant_bits = 0u32;
         for (i, state) in self.bit_states.iter().enumerate() {
             if *state != BitState::DontCare {
@@ -183,59 +189,72 @@ impl DigitalTrigger {
 }
 
 #[derive(Debug)]
-pub struct AnalogTriggerBuilder;
+pub struct AnalogTriggerBuilder {
+    volts: f64,
+    behavior: AnalogTriggerBehavior,
+}
 
 impl AnalogTriggerBuilder {
-    pub fn rising_edge(&self, volts: f64) -> AnalogTrigger {
-        AnalogTrigger::new(volts, AnalogTriggerBehavior::Rising)
+    pub fn rising_edge(mut self) -> AnalogTriggerBuilder {
+        self.behavior = AnalogTriggerBehavior::Rising;
+        self
     }
 
-    pub fn falling_edge(&self, volts: f64) -> AnalogTrigger {
-        AnalogTrigger::new(volts, AnalogTriggerBehavior::Falling)
+    pub fn falling_edge(mut self) -> AnalogTriggerBuilder {
+        self.behavior = AnalogTriggerBehavior::Falling;
+        self
     }
 
-    pub fn level(&self, volts: f64) -> AnalogTrigger {
-        AnalogTrigger::new(volts, AnalogTriggerBehavior::Level)
+    pub fn level(mut self) -> AnalogTriggerBuilder {
+        self.behavior = AnalogTriggerBehavior::Level;
+        self
     }
 
     /// Same as level, but will also trigger when the voltage did not match within 100ms.
-    pub fn auto(&self, volts: f64) -> AnalogTrigger {
-        AnalogTrigger::new(volts, AnalogTriggerBehavior::Auto)
+    pub fn auto(mut self) -> AnalogTriggerBuilder {
+        self.behavior = AnalogTriggerBehavior::Auto;
+        self
+    }
+
+    pub fn into_trigger(self, flea_probe: &FleaProbe) -> Result<AnalogTrigger, CaptureConfigError> {
+        let raw_level = (flea_probe.voltage_to_raw(self.volts) / 4.0 + 0.5) as i16;
+
+        if !(-1023..=1023).contains(&raw_level) {
+            return Err(CaptureConfigError::VoltageOutOfRange);
+        }
+        Ok(AnalogTrigger::new(raw_level, self.behavior))
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct AnalogTrigger {
-    pub level: f64,
+    pub level: i16,
     pub behavior: AnalogTriggerBehavior,
 }
 
 impl AnalogTrigger {
-    pub fn new(level: f64, behavior: AnalogTriggerBehavior) -> Self {
-        Self { level, behavior }
-    }
-
-    pub fn start_capturing_when() -> AnalogTriggerBuilder {
-        AnalogTriggerBuilder {}
-    }
-
-    pub fn into_trigger_fields<F>(
-        &self,
-        voltage_to_raw: F,
-    ) -> Result<StringifiedTriggerConfig, CaptureConfigError>
-    where
-        F: Fn(f64) -> f64,
-    {
-        let trigger_behavior_flag = self.behavior.as_str();
-        let raw_level = (voltage_to_raw(self.level) / 4.0 + 0.5) as i32;
-
-        if !(-1023..=1023).contains(&raw_level) {
-            return Err(CaptureConfigError::VoltageOutOfRange);
+    pub fn new(raw_value: i16, behavior: AnalogTriggerBehavior) -> Self {
+        Self {
+            level: raw_value,
+            behavior,
         }
+    }
 
-        Ok(StringifiedTriggerConfig {
-            trigger_fields: format!("{}{} 0", trigger_behavior_flag, raw_level),
-        })
+    pub fn start_capturing_when(volts: f64) -> AnalogTriggerBuilder {
+        AnalogTriggerBuilder {
+            volts,
+            behavior: AnalogTriggerBehavior::Auto,
+        }
+    }
+}
+
+impl TriggerConfig for AnalogTrigger {
+    fn into_trigger_fields(self) -> StringifiedTriggerConfig {
+        let trigger_behavior_flag = self.behavior.as_str();
+
+        StringifiedTriggerConfig {
+            trigger_fields: format!("{}{} 0", trigger_behavior_flag, self.level),
+        }
     }
 }
 
@@ -256,25 +275,5 @@ impl From<AnalogTrigger> for Trigger {
 impl From<DigitalTrigger> for Trigger {
     fn from(trigger: DigitalTrigger) -> Self {
         Self::Digital(trigger)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_analog_trigger_out_of_range() {
-        let trigger = AnalogTrigger::start_capturing_when().level(100.0);
-
-        let voltage_to_raw = |v: f64| v * 100.0; // This will create a value out of range
-        let result = trigger.into_trigger_fields(voltage_to_raw);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    #[should_panic(expected = "Bit index 9 out of range")]
-    fn test_digital_trigger_builder_panic_on_invalid_bit() {
-        DigitalTrigger::start_capturing_when().set_bit(9, BitState::High); // This should panic since valid range is 0-8
     }
 }

@@ -1,6 +1,6 @@
 use crate::flea_connector::{FleaConnector, FleaConnectorError};
 use crate::serial_terminal::{BusyFleaTerminal, ConnectionLostError, IdleFleaTerminal};
-use crate::trigger_config::{DigitalTrigger, StringifiedTriggerConfig, Trigger};
+use crate::trigger_config::{DigitalTrigger, StringifiedTriggerConfig, TriggerConfig};
 use polars::prelude::*;
 use std::time::Duration;
 
@@ -371,19 +371,6 @@ impl FleaProbe {
             multiplier,
             cal_zero: None,
             cal_3v3: None,
-        }
-    }
-
-    pub fn trigger_to_string(
-        &self,
-        trigger: Trigger,
-    ) -> Result<StringifiedTriggerConfig, CaptureConfigError> {
-        #[cfg(feature = "puffin")]
-        puffin::profile_function!();
-        
-        match trigger {
-            Trigger::Analog(at) => Ok(at.into_trigger_fields(|v| self.voltage_to_raw(v))?),
-            Trigger::Digital(dt) => Ok(dt.into_trigger_fields()),
         }
     }
 
