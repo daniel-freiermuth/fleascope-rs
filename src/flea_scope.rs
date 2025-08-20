@@ -68,6 +68,81 @@ pub enum CalibrationError {
     CalibrationDataError(#[from] PolarsError),
 }
 
+pub struct ScopeReading {
+    pub effective_msps: f64,
+    pub data: Vec<u8>,
+}
+
+impl ScopeReading {
+    pub fn parse_csv(&self) -> Result<LazyFrame, PolarsError> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+
+        let df = CsvReadOptions::default()
+            .with_has_header(false)
+            .into_reader_with_file_handle(std::io::Cursor::new(&self.data))
+            .finish()?
+            .lazy()
+            .select([
+                col("column_1").alias("bnc").cast(DataType::Float64),
+                col("column_2").alias("bitmap"),
+            ])
+            .with_row_index("row_index", Some(0))
+            .with_columns([
+                // Create time column using row index - more efficient than separate vector creation
+                (col("row_index").cast(DataType::Float64)
+                    * lit(1.0 / (self.effective_msps * 1_000_000.0)))
+                .alias("time"),
+            ])
+            .select([col("time"), col("bnc"), col("bitmap")]);
+
+        Ok(df)
+    }
+
+    /// Extract bits from bitmap column
+    pub fn extract_bits(df: &DataFrame) -> Result<DataFrame, PolarsError> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+
+        let bitmap_column = df.column("bitmap")?;
+        let bitmap_strings = bitmap_column.str()?;
+
+        // Parse hex strings and extract bits
+        let mut bit_columns: Vec<Vec<bool>> = vec![Vec::new(); 10];
+
+        for bitmap_opt in bitmap_strings.into_iter() {
+            if let Some(bitmap_str) = bitmap_opt {
+                let bitmap_str = bitmap_str.trim_start_matches("0x");
+                if let Ok(bitmap_val) = u32::from_str_radix(bitmap_str, 16) {
+                    for (bit, column) in bit_columns.iter_mut().enumerate().take(10) {
+                        column.push((bitmap_val >> bit) & 1 == 1);
+                    }
+                } else {
+                    // Default to false for unparseable values
+                    for column in bit_columns.iter_mut().take(10) {
+                        column.push(false);
+                    }
+                }
+            } else {
+                // Default to false for null values
+                for column in bit_columns.iter_mut().take(10) {
+                    column.push(false);
+                }
+            }
+        }
+
+        // Create new DataFrame with bit columns
+        let mut df_data = vec![df.column("time")?.clone(), df.column("bnc")?.clone()];
+
+        for (bit, values) in bit_columns.into_iter().enumerate() {
+            df_data.push(Series::new(format!("bit_{}", bit).into(), values).into());
+        }
+
+        let result = DataFrame::new(df_data)?;
+        Ok(result)
+    }
+}
+
 pub struct ReadingFleaScope {
     _ver: String,
     hostname: String,
@@ -253,7 +328,7 @@ impl IdleFleaScope {
         time_frame: Duration,
         trigger_fields: StringifiedTriggerConfig,
         delay: Option<Duration>,
-    ) -> Result<(f64, String), CaptureConfigError> {
+    ) -> Result<ScopeReading, CaptureConfigError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
         
@@ -261,77 +336,10 @@ impl IdleFleaScope {
             Self::prepare_read_command(time_frame, trigger_fields, delay)?;
 
         let data = self.serial.exec_sync(&command, None);
-        Ok((effective_msps, data))
-    }
-
-    pub fn parse_csv(csv_data: &str, effective_msps: f64) -> Result<LazyFrame, PolarsError> {
-        #[cfg(feature = "puffin")]
-        puffin::profile_function!();
-        
-        // Parse CSV data using Polars LazyFrames - you're absolutely right!
-        // For cases where we might only need one column, LazyFrames provide significant benefits
-        let df = CsvReadOptions::default()
-            .with_has_header(false)
-            .into_reader_with_file_handle(std::io::Cursor::new(csv_data.as_bytes()))
-            .finish()?
-            .lazy()
-            .select([
-                col("column_1").alias("bnc").cast(DataType::Float64),
-                col("column_2").alias("bitmap"),
-            ])
-            .with_row_index("row_index", Some(0))
-            .with_columns([
-                // Create time column using row index - more efficient than separate vector creation
-                (col("row_index").cast(DataType::Float64)
-                    * lit(1.0 / (effective_msps * 1_000_000.0)))
-                .alias("time"),
-            ])
-            .select([col("time"), col("bnc"), col("bitmap")]);
-
-        Ok(df)
-    }
-
-    /// Extract bits from bitmap column
-    pub fn extract_bits(df: &DataFrame) -> Result<DataFrame, PolarsError> {
-        #[cfg(feature = "puffin")]
-        puffin::profile_function!();
-        
-        let bitmap_column = df.column("bitmap")?;
-        let bitmap_strings = bitmap_column.str()?;
-
-        // Parse hex strings and extract bits
-        let mut bit_columns: Vec<Vec<bool>> = vec![Vec::new(); 10];
-
-        for bitmap_opt in bitmap_strings.into_iter() {
-            if let Some(bitmap_str) = bitmap_opt {
-                let bitmap_str = bitmap_str.trim_start_matches("0x");
-                if let Ok(bitmap_val) = u32::from_str_radix(bitmap_str, 16) {
-                    for (bit, column) in bit_columns.iter_mut().enumerate().take(10) {
-                        column.push((bitmap_val >> bit) & 1 == 1);
-                    }
-                } else {
-                    // Default to false for unparseable values
-                    for column in bit_columns.iter_mut().take(10) {
-                        column.push(false);
-                    }
-                }
-            } else {
-                // Default to false for null values
-                for column in bit_columns.iter_mut().take(10) {
-                    column.push(false);
-                }
-            }
-        }
-
-        // Create new DataFrame with bit columns
-        let mut df_data = vec![df.column("time")?.clone(), df.column("bnc")?.clone()];
-
-        for (bit, values) in bit_columns.into_iter().enumerate() {
-            df_data.push(Series::new(format!("bit_{}", bit).into(), values).into());
-        }
-
-        let result = DataFrame::new(df_data)?;
-        Ok(result)
+        Ok(ScopeReading {
+            effective_msps,
+            data,
+        })
     }
 
     /// Set the hostname
@@ -476,10 +484,10 @@ impl FleaProbe {
             .is_matching()
             .into_trigger_fields();
 
-        let (emsps, data) = scope
+        let reading = scope
             .read_sync(Duration::from_millis(20), trigger_fields, None)
             .expect("This should not fail, as we are reading a stable value for calibration");
-        let df = IdleFleaScope::parse_csv(&data, emsps)?;
+        let df = reading.parse_csv()?;
 
         let relevant_data = df.select([col("bnc")]).collect()?;
         let bnc_series = relevant_data.column("bnc")?;
