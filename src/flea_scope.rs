@@ -64,7 +64,7 @@ pub enum CalibrationError {
     #[error("Signal to unstable")]
     UnstableSignal,
 
-    #[error("Failure to get calibrartion data")]
+    #[error("Failure while processing calibration data")]
     CalibrationDataError(#[from] PolarsError),
 }
 
