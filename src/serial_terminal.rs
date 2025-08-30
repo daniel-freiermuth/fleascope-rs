@@ -6,12 +6,12 @@ use std::time::{Duration, Instant};
 const PROMPT: &[u8] = b"> ";
 
 #[derive(Debug)]
-pub struct FleaPreTerminal {
+pub struct StatelessFleaTerminal {
     serial: Box<dyn SerialPort>,
 }
 
 pub struct IdleFleaTerminal {
-    inner: FleaPreTerminal,
+    inner: StatelessFleaTerminal,
 }
 
 pub struct ConnectionLostError;
@@ -31,7 +31,7 @@ pub enum FleaTerminalError {
     ConnectionLost,
 }
 
-impl FleaPreTerminal {
+impl StatelessFleaTerminal {
     /// Create a new FleaTerminal instance
     pub fn new(port: &str) -> Result<Self, FleaTerminalError> {
         #[cfg(feature = "puffin")]
@@ -47,27 +47,6 @@ impl FleaPreTerminal {
         Ok(terminal)
     }
 
-    /// Initialize the terminal connection
-    pub fn initialize(mut self) -> Result<IdleFleaTerminal, (Self, FleaTerminalError)> {
-        #[cfg(feature = "puffin")]
-        puffin::profile_function!();
-
-        log::debug!("Connected to FleaScope. Sending CTRL-C to reset.");
-        match self.send_ctrl_c() {
-            Ok(_) => {}
-            Err(e) => return Err((self, e)),
-        };
-
-        log::debug!("Turning on prompt");
-        if let Err(e) = self.exec_sync("prompt on", Some(Duration::from_secs(1))) {
-            return Err((self, e));
-        };
-
-        if let Err(e) = self.flush() {
-            return Err((self, e));
-        };
-        Ok(IdleFleaTerminal { inner: self })
-    }
 
     /// Flush the serial buffer
     fn flush(&mut self) -> Result<(), FleaTerminalError> {
@@ -195,8 +174,36 @@ impl IdleFleaTerminal {
             .expect("Failed to execute command")
     }
 }
+impl TryFrom<StatelessFleaTerminal> for IdleFleaTerminal {
+    type Error = (StatelessFleaTerminal, FleaTerminalError);
+
+    fn try_from(mut value: StatelessFleaTerminal) -> Result<Self, Self::Error> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+
+        log::debug!("Connected to FleaScope. Sending CTRL-C to reset.");
+        match value.send_ctrl_c() {
+            Ok(_) => {}
+            Err(e) => return Err((value, e)),
+        };
+        if let Err(e) = value.flush() {
+            return Err((value, e));
+        };
+
+        log::debug!("Turning on prompt");
+        if let Err(e) = value.exec_sync("prompt on", Some(Duration::from_secs(1))) {
+            return Err((value, e));
+        };
+
+        if let Err(e) = value.flush() {
+            return Err((value, e));
+        };
+        Ok(IdleFleaTerminal { inner: value })
+    }
+}
+
 pub struct BusyFleaTerminal {
-    inner: FleaPreTerminal,
+    inner: StatelessFleaTerminal,
     response: Vec<u8>,
 }
 

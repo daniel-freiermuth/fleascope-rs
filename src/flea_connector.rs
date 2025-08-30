@@ -1,4 +1,4 @@
-use crate::serial_terminal::{FleaPreTerminal, FleaTerminalError, IdleFleaTerminal};
+use crate::serial_terminal::{StatelessFleaTerminal, FleaTerminalError, IdleFleaTerminal};
 use std::thread;
 use std::time::Duration;
 
@@ -40,7 +40,7 @@ impl FleaConnector {
         let terminal = if let Some(port) = port {
             log::debug!("Connecting to FleaScope on port {}", port);
             Self::validate_port(name, port)?;
-            FleaPreTerminal::new(port)?.initialize().unwrap()
+            StatelessFleaTerminal::new(port)?.try_into().unwrap()
         } else {
             let device_name = name.unwrap_or("FleaScope");
             Self::get_working_serial(device_name)?
@@ -150,9 +150,9 @@ impl FleaConnector {
     fn get_working_serial(name: &str) -> Result<IdleFleaTerminal, FleaConnectorError> {
         loop {
             let port_candidate = Self::get_device_port(name)?;
-            let serial = FleaPreTerminal::new(&port_candidate)?;
+            let serial = StatelessFleaTerminal::new(&port_candidate)?;
 
-            match serial.initialize() {
+            match serial.try_into() {
                 Ok(s) => break Ok(s),
                 Err((mut serial, FleaTerminalError::Timeout { .. })) => {
                     log::debug!("Timeout during initialization, sending reset and retrying");
