@@ -73,6 +73,11 @@ pub struct ScopeReading {
     pub data: Vec<u8>,
 }
 
+const RAW_COLUMN_NAME: &str = "bnc_raw";
+const CALIBRATED_COLUMN_NAME: &str = "bnc_calibrated";
+const BITMAP_COLUMN_NAME: &str = "bitmap";
+const TIME_COLUMN_NAME: &str = "time";
+
 impl ScopeReading {
     pub fn parse_csv(&self) -> Result<LazyFrame, PolarsError> {
         #[cfg(feature = "puffin")]
@@ -84,27 +89,27 @@ impl ScopeReading {
             .finish()?
             .lazy()
             .select([
-                col("column_1").alias("bnc").cast(DataType::Float64),
-                col("column_2").alias("bitmap"),
+                col("column_1").alias(RAW_COLUMN_NAME).cast(DataType::Float64),
+                col("column_2").alias(BITMAP_COLUMN_NAME),
             ])
             .with_row_index("row_index", Some(0))
             .with_columns([
                 // Create time column using row index - more efficient than separate vector creation
                 (col("row_index").cast(DataType::Float64)
                     * lit(1.0 / (self.effective_msps * 1_000_000.0)))
-                .alias("time"),
+                .alias(TIME_COLUMN_NAME),
             ])
-            .select([col("time"), col("bnc"), col("bitmap")]);
+            .select([col(TIME_COLUMN_NAME), col(RAW_COLUMN_NAME), col(BITMAP_COLUMN_NAME)]);
 
         Ok(df)
     }
 
     /// Extract bits from bitmap column
-    pub fn extract_bits(df: &DataFrame) -> Result<DataFrame, PolarsError> {
+    pub fn extract_bits(mut df: &mut DataFrame) -> Result<&DataFrame, PolarsError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
 
-        let bitmap_column = df.column("bitmap")?;
+        let bitmap_column = df.column(BITMAP_COLUMN_NAME)?;
         let bitmap_strings = bitmap_column.str()?;
 
         // Parse hex strings and extract bits
@@ -131,15 +136,13 @@ impl ScopeReading {
             }
         }
 
-        // Create new DataFrame with bit columns
-        let mut df_data = vec![df.column("time")?.clone(), df.column("bnc")?.clone()];
 
         for (bit, values) in bit_columns.into_iter().enumerate() {
-            df_data.push(Series::new(format!("bit_{}", bit).into(), values).into());
+            let column: Column = Series::new(format!("bit_{}", bit).into(), values).into();
+            df = df.with_column(column)?;
         }
 
-        let result = DataFrame::new(df_data)?;
-        Ok(result)
+        Ok(df)
     }
 }
 
@@ -487,7 +490,7 @@ impl FleaProbe {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
 
-        df.select([col("time"), self.raw_to_voltage(col("bnc")), col("bitmap")])
+        df.with_column(self.raw_to_voltage(col(RAW_COLUMN_NAME)).alias(CALIBRATED_COLUMN_NAME))
     }
 
     /// Read a stable value for calibration purposes
@@ -504,8 +507,8 @@ impl FleaProbe {
             .expect("This should not fail, as we are reading a stable value for calibration");
         let df = reading.parse_csv()?;
 
-        let relevant_data = df.select([col("bnc")]).collect()?;
-        let bnc_series = relevant_data.column("bnc")?;
+        let relevant_data = df.select([col(RAW_COLUMN_NAME)]).collect()?;
+        let bnc_series = relevant_data.column(RAW_COLUMN_NAME)?;
         let bnc_values: Vec<f64> = bnc_series.f64()?.into_no_null_iter().collect();
 
         let min_val = bnc_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
