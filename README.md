@@ -22,8 +22,8 @@ let mut (scope, x1, x10) = IdleFleaScope::connect("FleaScope", None, true)?;
 let trigger_config = DigitalTrigger::start_capturing_when()
                         .is_matching()
                         .into_trigger_fields()?;
-let (effective_msps, raw_data) = scope.read_sync(Duration::from_millis(10), trigger_config, None)?;
-let uncalibrated_frame : Polars::LazyFrame = IdleFleaScope::parse_csv(raw_data, effective_msps);
+let reading = scope.read_sync(Duration::from_millis(10), trigger_config, None)?;
+let uncalibrated_frame : Polars::LazyFrame = reading.parse_csv();
 let calibrated_frame = x1.apply_calibration(uncalibrated_frame)
 println!("Captured {} samples", calibrated_frame.collect().height());
 ```
