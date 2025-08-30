@@ -75,6 +75,8 @@ impl StatelessFleaTerminal {
 
     fn read_chunk(&mut self, response: &mut Vec<u8>) -> Result<bool, ConnectionLostError> {
         let mut read_buffer = [0u8; 1024]; // Read in chunks
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
         match self.serial.read(&mut read_buffer) {
             Ok(bytes_read) if bytes_read > 0 => {
                 #[cfg(feature = "puffin")]
@@ -136,7 +138,7 @@ impl StatelessFleaTerminal {
 
         loop {
             #[cfg(feature = "puffin")]
-            puffin::profile_scope!("serial_read_chunk");
+            puffin::profile_scope!("serial_read_chunk sync");
             match self.read_chunk(&mut response) {
                 Ok(true) => break,
                 Ok(false) => {}
@@ -276,9 +278,6 @@ impl BusyFleaTerminal {
     ) -> Result<Result<(Vec<u8>, IdleFleaTerminal), BusyFleaTerminal>, ConnectionLostError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
-
-        #[cfg(feature = "puffin")]
-        puffin::profile_scope!("serial_read_chunk");
 
         // There are 24000 bytes tranferred right now which takes 24ms at 1 MB/s
         // Capturing takes about 7ms, transfer around 30ms
