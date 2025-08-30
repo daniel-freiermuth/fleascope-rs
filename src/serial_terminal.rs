@@ -50,7 +50,26 @@ impl StatelessFleaTerminal {
 
     /// Flush the serial buffer
     fn flush(&mut self) -> Result<(), FleaTerminalError> {
+        log::debug!("Flushing serial port buffers once");
         self.serial.clear(serialport::ClearBuffer::All)?;
+        while self.serial.bytes_to_read().unwrap() > 0 {
+            log::debug!("Flushing serial port buffers twice");
+            self.serial.clear(serialport::ClearBuffer::Input)?;
+        }
+        loop {
+            let mut buf = [0u8; 1024];
+            match self.serial.read(&mut buf) {
+                Ok(n) => {
+                    if n == 0 {
+                        break;
+                    } else {
+                        log::debug!("Flushing serial port buffers thrice");
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::TimedOut => break,
+                Err(e) => return Err(FleaTerminalError::Io(e)),
+            }
+        }   
         Ok(())
     }
 
