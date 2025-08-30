@@ -298,3 +298,12 @@ impl BusyFleaTerminal {
         }
     }
 }
+
+impl Read for BusyFleaTerminal {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+
+        self.inner.serial.read(buffer)
+    }
+}

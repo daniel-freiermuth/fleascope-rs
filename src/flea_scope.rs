@@ -2,6 +2,7 @@ use crate::flea_connector::{FleaConnector, FleaConnectorError};
 use crate::serial_terminal::{BusyFleaTerminal, ConnectionLostError, IdleFleaTerminal};
 use crate::trigger_config::{DigitalTrigger, StringifiedTriggerConfig, TriggerConfig};
 use polars::prelude::*;
+use std::io::Read;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,6 +360,14 @@ impl IdleFleaScope {
         })
     }
 
+    pub fn stream(self) -> StreamingScope {
+        StreamingScope {
+            _ver: self._ver,
+            hostname: self.hostname,
+            serial: self.serial.exec_async("stream"),
+        }
+    }
+
     /// Set the hostname
     pub fn set_hostname(&mut self, hostname: &str) {
         self.serial
@@ -369,6 +378,34 @@ impl IdleFleaScope {
     pub fn teardown(mut self) {
         let _ = self.serial.exec_sync("echo on", None);
         let _ = self.serial.exec_sync("prompt on", None);
+    }
+}
+
+pub struct StreamingScope {
+    _ver: String,
+    hostname: String,
+    serial: BusyFleaTerminal,
+}
+
+impl StreamingScope {
+    pub fn stop(self) -> IdleFleaScope {
+        let serial = self.serial.cancel();
+        IdleFleaScope {
+            serial,
+            _ver: self._ver,
+            hostname: self.hostname,
+        }
+    }
+
+    pub fn read(&mut self, n: usize) -> Result<Vec<u16>, std::io::Error> {
+        #[cfg(feature = "puffin")]
+        puffin::profile_function!();
+        let mut buffer = vec![0u8; n * 2];
+        self.serial.read_exact(&mut buffer)?;
+        Ok(buffer
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect())
     }
 }
 
