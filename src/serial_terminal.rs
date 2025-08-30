@@ -47,7 +47,6 @@ impl StatelessFleaTerminal {
         Ok(terminal)
     }
 
-
     /// Flush the serial buffer
     fn flush(&mut self) -> Result<(), FleaTerminalError> {
         log::debug!("Flushing serial port buffers once");
@@ -69,7 +68,7 @@ impl StatelessFleaTerminal {
                 Err(e) if e.kind() == ErrorKind::TimedOut => break,
                 Err(e) => return Err(FleaTerminalError::Io(e)),
             }
-        }   
+        }
         Ok(())
     }
 

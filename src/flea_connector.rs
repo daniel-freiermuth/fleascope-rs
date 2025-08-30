@@ -1,4 +1,4 @@
-use crate::serial_terminal::{StatelessFleaTerminal, FleaTerminalError, IdleFleaTerminal};
+use crate::serial_terminal::{FleaTerminalError, IdleFleaTerminal, StatelessFleaTerminal};
 use std::thread;
 use std::time::Duration;
 

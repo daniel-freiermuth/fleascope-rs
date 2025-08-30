@@ -90,7 +90,9 @@ impl ScopeReading {
             .finish()?
             .lazy()
             .select([
-                col("column_1").alias(RAW_COLUMN_NAME).cast(DataType::Float64),
+                col("column_1")
+                    .alias(RAW_COLUMN_NAME)
+                    .cast(DataType::Float64),
                 col("column_2").alias(BITMAP_COLUMN_NAME),
             ])
             .with_row_index("row_index", Some(0))
@@ -100,7 +102,11 @@ impl ScopeReading {
                     * lit(1.0 / (self.effective_msps * 1_000_000.0)))
                 .alias(TIME_COLUMN_NAME),
             ])
-            .select([col(TIME_COLUMN_NAME), col(RAW_COLUMN_NAME), col(BITMAP_COLUMN_NAME)]);
+            .select([
+                col(TIME_COLUMN_NAME),
+                col(RAW_COLUMN_NAME),
+                col(BITMAP_COLUMN_NAME),
+            ]);
 
         Ok(df)
     }
@@ -136,7 +142,6 @@ impl ScopeReading {
                 }
             }
         }
-
 
         for (bit, values) in bit_columns.into_iter().enumerate() {
             let column: Column = Series::new(format!("bit_{}", bit).into(), values).into();
@@ -182,9 +187,10 @@ impl ReadingFleaScope {
             Err(e) => Err(e),
         }
     }
-    pub fn cancel(self) -> IdleFleaScope{
+    pub fn cancel(self) -> IdleFleaScope {
         let idle_serial = self.serial.cancel();
-        IdleFleaScope { serial: idle_serial,
+        IdleFleaScope {
+            serial: idle_serial,
             _ver: self._ver,
             hostname: self.hostname,
         }
@@ -527,7 +533,10 @@ impl FleaProbe {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
 
-        df.with_column(self.raw_to_voltage(col(RAW_COLUMN_NAME)).alias(CALIBRATED_COLUMN_NAME))
+        df.with_column(
+            self.raw_to_voltage(col(RAW_COLUMN_NAME))
+                .alias(CALIBRATED_COLUMN_NAME),
+        )
     }
 
     /// Read a stable value for calibration purposes
