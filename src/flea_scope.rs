@@ -154,13 +154,13 @@ pub struct ReadingFleaScope {
 }
 
 impl ReadingFleaScope {
-    pub fn is_done(
+    pub fn try_get_result(
         mut self,
     ) -> Result<Result<(IdleFleaScope, ScopeReading), ReadingFleaScope>, ConnectionLostError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
 
-        match self.serial.is_ready() {
+        match self.serial.try_get_result() {
             Ok(r) => match r {
                 Ok((data, idle_terminal)) => Ok(Ok((
                     IdleFleaScope {

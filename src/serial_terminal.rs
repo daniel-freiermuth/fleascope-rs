@@ -271,7 +271,7 @@ impl BusyFleaTerminal {
         (response_str, IdleFleaTerminal { inner: self.inner })
     }
 
-    pub fn is_ready(
+    pub fn try_get_result(
         mut self,
     ) -> Result<Result<(Vec<u8>, IdleFleaTerminal), BusyFleaTerminal>, ConnectionLostError> {
         #[cfg(feature = "puffin")]
