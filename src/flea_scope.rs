@@ -74,10 +74,10 @@ pub struct ScopeReading {
     pub data: Vec<u8>,
 }
 
-const RAW_COLUMN_NAME: &str = "bnc_raw";
-const CALIBRATED_COLUMN_NAME: &str = "bnc_calibrated";
-const BITMAP_COLUMN_NAME: &str = "bitmap";
-const TIME_COLUMN_NAME: &str = "time";
+pub const RAW_COLUMN_NAME: &str = "bnc_raw";
+pub const CALIBRATED_COLUMN_NAME: &str = "bnc_calibrated";
+pub const BITMAP_COLUMN_NAME: &str = "bitmap";
+pub const TIME_COLUMN_NAME: &str = "time";
 
 impl ScopeReading {
     pub fn parse_csv(&self) -> Result<LazyFrame, PolarsError> {
