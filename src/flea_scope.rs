@@ -551,10 +551,13 @@ impl FleaProbe {
         let bnc_values: Vec<f64> = scope
             .read_sync(Duration::from_millis(20), trigger_fields, None)
             .expect("This should not fail, as we are reading a stable value for calibration")
-        .parse_csv()?
-        .select([col(RAW_COLUMN_NAME)]).collect()?
-        .column(RAW_COLUMN_NAME)?
-        .f64()?.into_no_null_iter().collect();
+            .parse_csv()?
+            .select([col(RAW_COLUMN_NAME)])
+            .collect()?
+            .column(RAW_COLUMN_NAME)?
+            .f64()?
+            .into_no_null_iter()
+            .collect();
 
         let min_val = bnc_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
         let max_val = bnc_values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
