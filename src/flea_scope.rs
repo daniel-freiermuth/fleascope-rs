@@ -548,14 +548,13 @@ impl FleaProbe {
             .is_matching()
             .into_trigger_fields();
 
-        let reading = scope
+        let bnc_values: Vec<f64> = scope
             .read_sync(Duration::from_millis(20), trigger_fields, None)
-            .expect("This should not fail, as we are reading a stable value for calibration");
-        let df = reading.parse_csv()?;
-
-        let relevant_data = df.select([col(RAW_COLUMN_NAME)]).collect()?;
-        let bnc_series = relevant_data.column(RAW_COLUMN_NAME)?;
-        let bnc_values: Vec<f64> = bnc_series.f64()?.into_no_null_iter().collect();
+            .expect("This should not fail, as we are reading a stable value for calibration")
+        .parse_csv()?
+        .select([col(RAW_COLUMN_NAME)]).collect()?
+        .column(RAW_COLUMN_NAME)?
+        .f64()?.into_no_null_iter().collect();
 
         let min_val = bnc_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
         let max_val = bnc_values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
