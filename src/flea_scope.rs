@@ -82,7 +82,7 @@ pub const TIME_COLUMN_NAME: &str = "time";
 impl ScopeReading {
     pub fn parse_csv(&self) -> Result<LazyFrame, PolarsError> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         let df = CsvReadOptions::default()
             .with_has_header(false)
@@ -114,7 +114,7 @@ impl ScopeReading {
     /// Extract bits from bitmap column
     pub fn extract_bits(mut df: &mut DataFrame) -> Result<&DataFrame, PolarsError> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         let bitmap_column = df.column(BITMAP_COLUMN_NAME)?;
         let bitmap_strings = bitmap_column.str()?;
@@ -164,7 +164,7 @@ impl ReadingFleaScope {
         mut self,
     ) -> Result<Result<(IdleFleaScope, ScopeReading), Self>, ConnectionLostError> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         match self.serial.try_get_result() {
             Ok(r) => match r {
@@ -284,7 +284,7 @@ impl IdleFleaScope {
         delay: Option<Duration>,
     ) -> Result<(f64, String), CaptureConfigError> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         let delay = delay.unwrap_or(Duration::from_millis(0));
 
@@ -332,7 +332,7 @@ impl IdleFleaScope {
         delay: Option<Duration>,
     ) -> Result<ReadingFleaScope, (Self, CaptureConfigError)> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         match Self::prepare_read_command(time_frame, trigger_fields, delay) {
             Ok((effective_msps, command)) => {
@@ -355,7 +355,7 @@ impl IdleFleaScope {
         delay: Option<Duration>,
     ) -> Result<ScopeReading, CaptureConfigError> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         let (effective_msps, command) =
             Self::prepare_read_command(time_frame, trigger_fields, delay)?;
@@ -405,7 +405,7 @@ impl StreamingScope {
 
     pub fn read(&mut self, n: usize) -> Result<Vec<u16>, std::io::Error> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
         let mut buffer = vec![0u8; n * 2];
         self.serial.read_exact(&mut buffer)?;
         Ok(buffer
@@ -533,7 +533,7 @@ impl FleaProbe {
 
     pub fn apply_calibration(&self, df: LazyFrame) -> LazyFrame {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         df.with_column(
             self.raw_to_voltage(col(RAW_COLUMN_NAME))

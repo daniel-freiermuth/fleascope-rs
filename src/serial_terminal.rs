@@ -35,7 +35,7 @@ impl StatelessFleaTerminal {
     /// Create a new `FleaTerminal` instance
     pub fn new(port: &str) -> Result<Self, FleaTerminalError> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         let serial = serialport::new(port, 9600)
             .timeout(Duration::from_millis(70))
@@ -74,11 +74,11 @@ impl StatelessFleaTerminal {
     fn read_chunk(&mut self, response: &mut Vec<u8>) -> Result<bool, ConnectionLostError> {
         let mut read_buffer = [0u8; 1024]; // Read in chunks
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
         match self.serial.read(&mut read_buffer) {
             Ok(bytes_read) if bytes_read > 0 => {
                 #[cfg(feature = "cpu-profiling")]
-                puffin::profile_scope!("process_chunk_data", format!("{}", bytes_read));
+                let _span = tracy_client::span!("process_chunk_data");
 
                 response.extend_from_slice(&read_buffer[..bytes_read]);
 
@@ -117,11 +117,11 @@ impl StatelessFleaTerminal {
         timeout: Option<Duration>,
     ) -> Result<Vec<u8>, FleaTerminalError> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         {
             #[cfg(feature = "cpu-profiling")]
-            puffin::profile_scope!("serial_write_command");
+            let _span = tracy_client::span!("serial_write_command");
             // Send command
             let command_with_newline = format!("{command}\n");
             self.serial.write_all(command_with_newline.as_bytes())?;
@@ -129,14 +129,14 @@ impl StatelessFleaTerminal {
 
         // Read response until prompt
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_scope!("serial_read_response");
+        let _span = tracy_client::span!("serial_read_response");
 
         let mut response = Vec::new();
         let now = Instant::now();
 
         loop {
             #[cfg(feature = "cpu-profiling")]
-            puffin::profile_scope!("serial_read_chunk sync");
+            let _span = tracy_client::span!("serial_read_chunk");
             match self.read_chunk(&mut response) {
                 Ok(true) => break,
                 Ok(false) => {}
@@ -171,7 +171,7 @@ impl StatelessFleaTerminal {
 impl IdleFleaTerminal {
     pub fn exec_async(mut self, command: &str) -> BusyFleaTerminal {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         let command_with_newline = format!("{command}\n");
         self.inner
@@ -186,7 +186,7 @@ impl IdleFleaTerminal {
     }
     pub fn exec_sync(&mut self, command: &str, timeout: Option<Duration>) -> Vec<u8> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         self.inner
             .exec_sync(command, timeout)
@@ -198,7 +198,7 @@ impl TryFrom<StatelessFleaTerminal> for IdleFleaTerminal {
 
     fn try_from(mut value: StatelessFleaTerminal) -> Result<Self, Self::Error> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         log::debug!("Connected to FleaScope. Sending CTRL-C to reset.");
         match value.send_ctrl_c() {
@@ -262,7 +262,7 @@ impl BusyFleaTerminal {
 
     fn into_result(self) -> (Vec<u8>, IdleFleaTerminal) {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         // Remove the prompt from the end and convert to string
         let response_without_prompt = &self.response[..self.response.len() - PROMPT.len()];
@@ -275,7 +275,7 @@ impl BusyFleaTerminal {
         mut self,
     ) -> Result<Result<(Vec<u8>, IdleFleaTerminal), Self>, ConnectionLostError> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         // There are 24000 bytes tranferred right now which takes 24ms at 1 MB/s
         // Capturing takes about 7ms, transfer around 30ms
@@ -300,7 +300,7 @@ impl BusyFleaTerminal {
 impl Read for BusyFleaTerminal {
     fn read(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
         #[cfg(feature = "cpu-profiling")]
-        puffin::profile_function!();
+        let _span = tracy_client::span!();
 
         self.inner.serial.read(buffer)
     }
