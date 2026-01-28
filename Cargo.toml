@@ -14,7 +14,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-puffin = ["dep:puffin"]
+cpu-profiling = ["dep:puffin"]
 
 [dependencies]
 serialport = "4.7.3"

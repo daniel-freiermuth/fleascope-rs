@@ -34,7 +34,7 @@ pub enum FleaTerminalError {
 impl StatelessFleaTerminal {
     /// Create a new `FleaTerminal` instance
     pub fn new(port: &str) -> Result<Self, FleaTerminalError> {
-        #[cfg(feature = "puffin")]
+        #[cfg(feature = "cpu-profiling")]
         puffin::profile_function!();
 
         let serial = serialport::new(port, 9600)
@@ -73,11 +73,11 @@ impl StatelessFleaTerminal {
 
     fn read_chunk(&mut self, response: &mut Vec<u8>) -> Result<bool, ConnectionLostError> {
         let mut read_buffer = [0u8; 1024]; // Read in chunks
-        #[cfg(feature = "puffin")]
+        #[cfg(feature = "cpu-profiling")]
         puffin::profile_function!();
         match self.serial.read(&mut read_buffer) {
             Ok(bytes_read) if bytes_read > 0 => {
-                #[cfg(feature = "puffin")]
+                #[cfg(feature = "cpu-profiling")]
                 puffin::profile_scope!("process_chunk_data", format!("{}", bytes_read));
 
                 response.extend_from_slice(&read_buffer[..bytes_read]);
@@ -116,11 +116,11 @@ impl StatelessFleaTerminal {
         command: &str,
         timeout: Option<Duration>,
     ) -> Result<Vec<u8>, FleaTerminalError> {
-        #[cfg(feature = "puffin")]
+        #[cfg(feature = "cpu-profiling")]
         puffin::profile_function!();
 
         {
-            #[cfg(feature = "puffin")]
+            #[cfg(feature = "cpu-profiling")]
             puffin::profile_scope!("serial_write_command");
             // Send command
             let command_with_newline = format!("{command}\n");
@@ -128,14 +128,14 @@ impl StatelessFleaTerminal {
         }
 
         // Read response until prompt
-        #[cfg(feature = "puffin")]
+        #[cfg(feature = "cpu-profiling")]
         puffin::profile_scope!("serial_read_response");
 
         let mut response = Vec::new();
         let now = Instant::now();
 
         loop {
-            #[cfg(feature = "puffin")]
+            #[cfg(feature = "cpu-profiling")]
             puffin::profile_scope!("serial_read_chunk sync");
             match self.read_chunk(&mut response) {
                 Ok(true) => break,
@@ -170,7 +170,7 @@ impl StatelessFleaTerminal {
 
 impl IdleFleaTerminal {
     pub fn exec_async(mut self, command: &str) -> BusyFleaTerminal {
-        #[cfg(feature = "puffin")]
+        #[cfg(feature = "cpu-profiling")]
         puffin::profile_function!();
 
         let command_with_newline = format!("{command}\n");
@@ -185,7 +185,7 @@ impl IdleFleaTerminal {
         }
     }
     pub fn exec_sync(&mut self, command: &str, timeout: Option<Duration>) -> Vec<u8> {
-        #[cfg(feature = "puffin")]
+        #[cfg(feature = "cpu-profiling")]
         puffin::profile_function!();
 
         self.inner
@@ -197,7 +197,7 @@ impl TryFrom<StatelessFleaTerminal> for IdleFleaTerminal {
     type Error = (StatelessFleaTerminal, FleaTerminalError);
 
     fn try_from(mut value: StatelessFleaTerminal) -> Result<Self, Self::Error> {
-        #[cfg(feature = "puffin")]
+        #[cfg(feature = "cpu-profiling")]
         puffin::profile_function!();
 
         log::debug!("Connected to FleaScope. Sending CTRL-C to reset.");
@@ -261,7 +261,7 @@ impl BusyFleaTerminal {
     }
 
     fn into_result(self) -> (Vec<u8>, IdleFleaTerminal) {
-        #[cfg(feature = "puffin")]
+        #[cfg(feature = "cpu-profiling")]
         puffin::profile_function!();
 
         // Remove the prompt from the end and convert to string
@@ -274,7 +274,7 @@ impl BusyFleaTerminal {
     pub fn try_get_result(
         mut self,
     ) -> Result<Result<(Vec<u8>, IdleFleaTerminal), Self>, ConnectionLostError> {
-        #[cfg(feature = "puffin")]
+        #[cfg(feature = "cpu-profiling")]
         puffin::profile_function!();
 
         // There are 24000 bytes tranferred right now which takes 24ms at 1 MB/s
@@ -299,7 +299,7 @@ impl BusyFleaTerminal {
 
 impl Read for BusyFleaTerminal {
     fn read(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
-        #[cfg(feature = "puffin")]
+        #[cfg(feature = "cpu-profiling")]
         puffin::profile_function!();
 
         self.inner.serial.read(buffer)
