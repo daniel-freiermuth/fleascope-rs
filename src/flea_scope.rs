@@ -14,13 +14,13 @@ pub enum ProbeType {
 impl ProbeType {
     pub fn to_multiplier(&self) -> i32 {
         match self {
-            ProbeType::X1 => 1,
-            ProbeType::X10 => 10,
+            Self::X1 => 1,
+            Self::X10 => 10,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum Waveform {
     Sine,
     Square,
@@ -31,10 +31,10 @@ pub enum Waveform {
 impl Waveform {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Waveform::Sine => "sine",
-            Waveform::Square => "square",
-            Waveform::Triangle => "triangle",
-            Waveform::Ekg => "ekg",
+            Self::Sine => "sine",
+            Self::Square => "square",
+            Self::Triangle => "triangle",
+            Self::Ekg => "ekg",
         }
     }
 }
@@ -122,7 +122,7 @@ impl ScopeReading {
         // Parse hex strings and extract bits
         let mut bit_columns: Vec<Vec<bool>> = vec![Vec::new(); 10];
 
-        for bitmap_opt in bitmap_strings.into_iter() {
+        for bitmap_opt in bitmap_strings {
             if let Some(bitmap_str) = bitmap_opt {
                 let bitmap_str = bitmap_str.trim_start_matches("0x");
                 if let Ok(bitmap_val) = u32::from_str_radix(bitmap_str, 16) {
@@ -144,7 +144,7 @@ impl ScopeReading {
         }
 
         for (bit, values) in bit_columns.into_iter().enumerate() {
-            let column: Column = Series::new(format!("bit_{}", bit).into(), values).into();
+            let column: Column = Series::new(format!("bit_{bit}").into(), values).into();
             df = df.with_column(column)?;
         }
 
@@ -162,7 +162,7 @@ pub struct ReadingFleaScope {
 impl ReadingFleaScope {
     pub fn try_get_result(
         mut self,
-    ) -> Result<Result<(IdleFleaScope, ScopeReading), ReadingFleaScope>, ConnectionLostError> {
+    ) -> Result<Result<(IdleFleaScope, ScopeReading), Self>, ConnectionLostError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
 
@@ -210,7 +210,7 @@ impl IdleFleaScope {
     const INTERLEAVE: u32 = 5; // number of ADCs interleaved
     const TOTAL_SAMPLES: u32 = 2000;
 
-    /// Connect to a FleaScope device
+    /// Connect to a `FleaScope` device
     pub fn connect(
         name: Option<&str>,
         port: Option<&str>,
@@ -228,18 +228,18 @@ impl IdleFleaScope {
         Ok((scope, x1, x10))
     }
 
-    /// Create a new FleaScope from an existing terminal connection
+    /// Create a new `FleaScope` from an existing terminal connection
     pub fn new(mut serial: IdleFleaTerminal) -> Self {
         log::debug!("Turning off echo");
         serial.exec_sync("echo off", None);
 
         let ver = String::from_utf8(serial.exec_sync("ver", None)).expect("Failed to read version");
-        log::debug!("FleaScope version: {}", ver);
+        log::debug!("FleaScope version: {ver}");
         // TODO: check if version is compatible
 
         let hostname =
             String::from_utf8(serial.exec_sync("hostname", None)).expect("Failed to read hostname");
-        log::debug!("FleaScope hostname: {}", hostname);
+        log::debug!("FleaScope hostname: {hostname}");
         // TODO: check if hostname is correct
 
         Self {
@@ -258,9 +258,10 @@ impl IdleFleaScope {
     /// Convert number1 to prescaler value
     fn number1_to_prescaler(number1: u32) -> Result<u32, CaptureConfigError> {
         let ps = if number1 > 1000 { 16 } else { 1 };
-        let t =
-            ((Self::MCU_MHZ * (number1 * Self::INTERLEAVE) as f64 / ps as f64 / Self::MSPS as f64)
-                + 0.5) as u32;
+        let t = ((Self::MCU_MHZ * f64::from(number1 * Self::INTERLEAVE)
+            / f64::from(ps)
+            / f64::from(Self::MSPS))
+            + 0.5) as u32;
 
         if t == 0 {
             return Err(CaptureConfigError::TimeFrameTooSmall);
@@ -274,7 +275,7 @@ impl IdleFleaScope {
 
     /// Convert prescaler to effective MSPS
     fn prescaler_to_effective_msps(prescaler: u32) -> f64 {
-        Self::MCU_MHZ * Self::INTERLEAVE as f64 / prescaler as f64
+        Self::MCU_MHZ * f64::from(Self::INTERLEAVE) / f64::from(prescaler)
     }
 
     fn prepare_read_command(
@@ -329,7 +330,7 @@ impl IdleFleaScope {
         time_frame: Duration,
         trigger_fields: StringifiedTriggerConfig,
         delay: Option<Duration>,
-    ) -> Result<ReadingFleaScope, (IdleFleaScope, CaptureConfigError)> {
+    ) -> Result<ReadingFleaScope, (Self, CaptureConfigError)> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
 
@@ -376,8 +377,7 @@ impl IdleFleaScope {
 
     /// Set the hostname
     pub fn set_hostname(&mut self, hostname: &str) {
-        self.serial
-            .exec_sync(&format!("hostname {}", hostname), None);
+        self.serial.exec_sync(&format!("hostname {hostname}"), None);
         self.hostname = hostname.to_string();
     }
 
@@ -479,8 +479,9 @@ impl FleaProbe {
         .parse()
         .expect("Failed to parse cal_3v3_x value");
 
-        self.cal_zero = Some((cal_zero_raw - 1000) as f64 + 2048.0);
-        self.cal_3v3 = Some((cal_3v3_raw - 1000) as f64 / self.multiplier.to_multiplier() as f64);
+        self.cal_zero = Some(f64::from(cal_zero_raw - 1000) + 2048.0);
+        self.cal_3v3 =
+            Some(f64::from(cal_3v3_raw - 1000) / f64::from(self.multiplier.to_multiplier()));
 
         log::debug!(
             "Probe x{} calibration: cal_zero={:?}, cal_3v3={:?}",
@@ -507,7 +508,8 @@ impl FleaProbe {
         let cal_3v3 = self.cal_3v3.ok_or(CalibrationError::NoCalibrationPresent)?;
 
         let zero_value = (cal_zero - 2048.0 + 1000.0 + 0.5) as i32;
-        let v3v3_value = (cal_3v3 * self.multiplier.to_multiplier() as f64 + 1000.0 + 0.5) as i32;
+        let v3v3_value =
+            (cal_3v3.mul_add(f64::from(self.multiplier.to_multiplier()), 1000.0) + 0.5) as i32;
 
         scope.serial.exec_sync(
             &format!(
@@ -583,7 +585,7 @@ impl FleaProbe {
         let cal_zero = self.cal_zero.expect("Calibration for 0V is not set");
         let cal_3v3 = self.cal_3v3.expect("Calibration for 3.3V is not set");
 
-        (voltage / 3.3 * cal_3v3) + cal_zero
+        (voltage / 3.3).mul_add(cal_3v3, cal_zero)
     }
 
     /// Calibrate for 0V

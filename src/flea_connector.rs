@@ -31,14 +31,14 @@ pub enum FleaConnectorError {
 pub struct FleaConnector;
 
 impl FleaConnector {
-    /// Connect to a FleaScope device
+    /// Connect to a `FleaScope` device
     pub fn connect(
         name: Option<&str>,
         port: Option<&str>,
         _read_calibrations: bool,
     ) -> Result<IdleFleaTerminal, FleaConnectorError> {
         let terminal = if let Some(port) = port {
-            log::debug!("Connecting to FleaScope on port {}", port);
+            log::debug!("Connecting to FleaScope on port {port}");
             Self::validate_port(name, port)?;
             StatelessFleaTerminal::new(port)?.try_into().unwrap()
         } else {
@@ -49,7 +49,7 @@ impl FleaConnector {
         Ok(terminal)
     }
 
-    /// Validate that a given port corresponds to a FleaScope device
+    /// Validate that a given port corresponds to a `FleaScope` device
     fn validate_port(name: Option<&str>, port: &str) -> Result<(), FleaConnectorError> {
         let mut devices = Self::get_available_devices(name)?;
 
@@ -62,7 +62,7 @@ impl FleaConnector {
         Ok(())
     }
 
-    /// Validate that a serial port info represents a FleaScope device
+    /// Validate that a serial port info represents a `FleaScope` device
     fn validate_device(name: Option<&str>, port_info: &serialport::SerialPortInfo) -> bool {
         // Valid vendor/product ID combinations for FleaScope devices
         let valid_vendor_product_variants = [
@@ -101,12 +101,12 @@ impl FleaConnector {
         true
     }
 
-    /// Get all available FleaScope devices as an iterator
+    /// Get all available `FleaScope` devices as an iterator
     pub fn get_available_devices(
         name: Option<&str>,
     ) -> Result<impl Iterator<Item = FleaDevice>, FleaConnectorError> {
         let ports = serialport::available_ports()?;
-        let name_owned = name.map(|s| s.to_string());
+        let name_owned = name.map(std::string::ToString::to_string);
 
         Ok(ports.into_iter().filter_map(move |port_info| {
             // Only consider USB devices
@@ -125,7 +125,7 @@ impl FleaConnector {
         }))
     }
 
-    /// Get all available FleaScope devices as a Vec (convenience method)
+    /// Get all available `FleaScope` devices as a Vec (convenience method)
     pub fn get_available_devices_vec(
         name: Option<&str>,
     ) -> Result<Vec<FleaDevice>, FleaConnectorError> {
@@ -134,7 +134,7 @@ impl FleaConnector {
 
     /// Get the port for a device with the given name
     fn get_device_port(name: &str) -> Result<String, FleaConnectorError> {
-        log::debug!("Searching for FleaScope device with name {}", name);
+        log::debug!("Searching for FleaScope device with name {name}");
 
         let mut devices = Self::get_available_devices(Some(name))?;
 

@@ -32,7 +32,7 @@ pub enum FleaTerminalError {
 }
 
 impl StatelessFleaTerminal {
-    /// Create a new FleaTerminal instance
+    /// Create a new `FleaTerminal` instance
     pub fn new(port: &str) -> Result<Self, FleaTerminalError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
@@ -61,9 +61,8 @@ impl StatelessFleaTerminal {
                 Ok(n) => {
                     if n == 0 {
                         break;
-                    } else {
-                        log::debug!("Flushing serial port buffers thrice");
                     }
+                    log::debug!("Flushing serial port buffers thrice");
                 }
                 Err(e) if e.kind() == ErrorKind::TimedOut => break,
                 Err(e) => return Err(FleaTerminalError::Io(e)),
@@ -107,7 +106,7 @@ impl StatelessFleaTerminal {
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => Err(ConnectionLostError),
             Err(e) => {
                 tracing::info!("Serial read error (kind: {:?})...{e}", e.kind());
-                panic!("Serial read error: {}", e);
+                panic!("Serial read error: {e}");
             }
         }
     }
@@ -124,7 +123,7 @@ impl StatelessFleaTerminal {
             #[cfg(feature = "puffin")]
             puffin::profile_scope!("serial_write_command");
             // Send command
-            let command_with_newline = format!("{}\n", command);
+            let command_with_newline = format!("{command}\n");
             self.serial.write_all(command_with_newline.as_bytes())?;
         }
 
@@ -142,7 +141,7 @@ impl StatelessFleaTerminal {
                 Ok(true) => break,
                 Ok(false) => {}
                 Err(ConnectionLostError) => return Err(FleaTerminalError::ConnectionLost),
-            };
+            }
             if let Some(t) = timeout {
                 if now.elapsed() >= t {
                     return Err(FleaTerminalError::Timeout { timeout: t });
@@ -174,7 +173,7 @@ impl IdleFleaTerminal {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
 
-        let command_with_newline = format!("{}\n", command);
+        let command_with_newline = format!("{command}\n");
         self.inner
             .serial
             .write_all(command_with_newline.as_bytes())
@@ -203,22 +202,22 @@ impl TryFrom<StatelessFleaTerminal> for IdleFleaTerminal {
 
         log::debug!("Connected to FleaScope. Sending CTRL-C to reset.");
         match value.send_ctrl_c() {
-            Ok(_) => {}
+            Ok(()) => {}
             Err(e) => return Err((value, e)),
-        };
+        }
         if let Err(e) = value.flush() {
             return Err((value, e));
-        };
+        }
 
         log::debug!("Turning on prompt");
         if let Err(e) = value.exec_sync("prompt on", Some(Duration::from_secs(1))) {
             return Err((value, e));
-        };
+        }
 
         if let Err(e) = value.flush() {
             return Err((value, e));
-        };
-        Ok(IdleFleaTerminal { inner: value })
+        }
+        Ok(Self { inner: value })
     }
 }
 
@@ -248,7 +247,7 @@ impl BusyFleaTerminal {
                 }
                 Ok(_) => continue, // No data available right now, but no error
                 Err(e) if e.kind() == ErrorKind::TimedOut => continue, // Timeout is expected in non-blocking reads
-                Err(e) => panic!("Serial read error: {}", e),
+                Err(e) => panic!("Serial read error: {e}"),
             }
             // Check if we have the prompt at the end
             if prompt_buffer.len() == PROMPT.len()
@@ -274,7 +273,7 @@ impl BusyFleaTerminal {
 
     pub fn try_get_result(
         mut self,
-    ) -> Result<Result<(Vec<u8>, IdleFleaTerminal), BusyFleaTerminal>, ConnectionLostError> {
+    ) -> Result<Result<(Vec<u8>, IdleFleaTerminal), Self>, ConnectionLostError> {
         #[cfg(feature = "puffin")]
         puffin::profile_function!();
 

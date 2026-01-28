@@ -1,18 +1,18 @@
-//! # FleaScope RS
+//! # `FleaScope` RS
 //!
-//! A Rust library for configuring triggers and communicating with FleaScope oscilloscope devices.
+//! A Rust library for configuring triggers and communicating with `FleaScope` oscilloscope devices.
 //!
 //! This library provides types and builders for creating digital and analog triggers
-//! that can be used to control data capture timing in FleaScope oscilloscope devices,
+//! that can be used to control data capture timing in `FleaScope` oscilloscope devices,
 //! as well as a serial terminal interface for communication and complete device control.
 //!
 //! ## Features
 //!
-//! - **Cross-platform device discovery**: Uses `serialport` for finding FleaScope devices
+//! - **Cross-platform device discovery**: Uses `serialport` for finding `FleaScope` devices
 //! - **Trigger configuration**: Digital and analog triggers with builder patterns
 //! - **Data acquisition**: Raw oscilloscope data reading with automatic time indexing
 //! - **Calibration management**: Read/write probe calibrations from/to device flash
-//! - **DataFrame output**: Uses `polars` for efficient data handling instead of pandas
+//! - **`DataFrame` output**: Uses `polars` for efficient data handling instead of pandas
 //! - **Type safety**: Strong typing and error handling throughout
 //!
 //! ## Examples

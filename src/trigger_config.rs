@@ -14,14 +14,14 @@ impl StringifiedTriggerConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitState {
     High,
     Low,
     DontCare,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DigitalTriggerBehavior {
     Auto,
     While,
@@ -32,15 +32,15 @@ pub enum DigitalTriggerBehavior {
 impl DigitalTriggerBehavior {
     pub fn as_str(&self) -> &'static str {
         match self {
-            DigitalTriggerBehavior::Auto => "~",
-            DigitalTriggerBehavior::While => "",
-            DigitalTriggerBehavior::Start => "+",
-            DigitalTriggerBehavior::Stop => "-",
+            Self::Auto => "~",
+            Self::While => "",
+            Self::Start => "+",
+            Self::Stop => "-",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalogTriggerBehavior {
     Auto,
     Level,
@@ -51,15 +51,16 @@ pub enum AnalogTriggerBehavior {
 impl AnalogTriggerBehavior {
     pub fn as_str(&self) -> &'static str {
         match self {
-            AnalogTriggerBehavior::Auto => "~",
-            AnalogTriggerBehavior::Level => "",
-            AnalogTriggerBehavior::Rising => "+",
-            AnalogTriggerBehavior::Falling => "-",
+            Self::Auto => "~",
+            Self::Level => "",
+            Self::Rising => "+",
+            Self::Falling => "-",
         }
     }
 }
 
 #[derive(Debug)]
+#[must_use]
 pub struct BitTriggerBuilder {
     bit_states: [BitState; 9],
 }
@@ -72,13 +73,12 @@ impl BitTriggerBuilder {
     }
 
     pub fn set_bit(mut self, bit: usize, state: BitState) -> Self {
-        if bit >= self.bit_states.len() {
-            panic!(
-                "Bit index {} out of range, must be between 0 and {}",
-                bit,
-                self.bit_states.len() - 1
-            );
-        }
+        assert!(
+            (bit < self.bit_states.len()),
+            "Bit index {} out of range, must be between 0 and {}",
+            bit,
+            self.bit_states.len() - 1
+        );
         self.bit_states[bit] = state;
         self
     }
@@ -131,7 +131,7 @@ impl BitTriggerBuilder {
         DigitalTrigger::new(self.bit_states, DigitalTriggerBehavior::Stop)
     }
 
-    /// Same as is_matching, but will also trigger when the bits did not match within 100ms.
+    /// Same as `is_matching`, but will also trigger when the bits did not match within 100ms.
     pub fn auto(self) -> DigitalTrigger {
         DigitalTrigger::new(self.bit_states, DigitalTriggerBehavior::Auto)
     }
@@ -181,37 +181,37 @@ impl TriggerConfig for DigitalTrigger {
         let trigger_behavior_flag = self.behavior.as_str();
         StringifiedTriggerConfig {
             trigger_fields: format!(
-                "{}0x{:02x} 0x{:02x}",
-                trigger_behavior_flag, active_bits, relevant_bits
+                "{trigger_behavior_flag}0x{active_bits:02x} 0x{relevant_bits:02x}"
             ),
         }
     }
 }
 
 #[derive(Debug, Clone)]
+#[must_use]
 pub struct AnalogTriggerBuilder {
     pub volts: f64,
     pub behavior: AnalogTriggerBehavior,
 }
 
 impl AnalogTriggerBuilder {
-    pub fn rising_edge(mut self) -> AnalogTriggerBuilder {
+    pub fn rising_edge(mut self) -> Self {
         self.behavior = AnalogTriggerBehavior::Rising;
         self
     }
 
-    pub fn falling_edge(mut self) -> AnalogTriggerBuilder {
+    pub fn falling_edge(mut self) -> Self {
         self.behavior = AnalogTriggerBehavior::Falling;
         self
     }
 
-    pub fn level(mut self) -> AnalogTriggerBuilder {
+    pub fn level(mut self) -> Self {
         self.behavior = AnalogTriggerBehavior::Level;
         self
     }
 
     /// Same as level, but will also trigger when the voltage did not match within 100ms.
-    pub fn auto(mut self) -> AnalogTriggerBuilder {
+    pub fn auto(mut self) -> Self {
         self.behavior = AnalogTriggerBehavior::Auto;
         self
     }
