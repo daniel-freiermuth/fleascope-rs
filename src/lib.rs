@@ -20,25 +20,28 @@
 //! ### Device Connection and Basic Usage
 //!
 //! ```rust,no_run
-//! use fleascope_rs::{FleaScope, ProbeType, Waveform};
+//! use fleascope_rs::{IdleFleaScope, DigitalTrigger, Waveform};
+//! use fleascope_rs::trigger_config::TriggerConfig;
 //! use std::time::Duration;
 //!
 //! // Connect to any available FleaScope device
-//! let mut scope = FleaScope::connect(None, None, true)?;
+//! let (mut scope, x1_probe, x10_probe) = IdleFleaScope::connect(None, None, true)?;
 //!
 //! // Set up signal generator
-//! scope.set_waveform(Waveform::Sine, 1000)?; // 1kHz sine wave
+//! scope.set_waveform(Waveform::Sine, 1000); // 1kHz sine wave
 //!
-//! // Read data using the 1x probe with default auto trigger
-//! let data = scope.read(ProbeType::X1, Duration::from_millis(10), None, None)?;
-//! println!("Captured {} samples", data.height());
+//! // Read data using default auto trigger
+//! let trigger = DigitalTrigger::start_capturing_when().is_matching().into_trigger_fields();
+//! let reading = scope.read_sync(Duration::from_millis(10), trigger, None)?;
+//! let data = reading.parse_csv()?;
+//! println!("Captured {} samples", data.collect()?.height());
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! ### Digital Trigger
 //!
 //! ```rust
-//! use fleascope_rs::trigger_config::{DigitalTrigger, BitState};
+//! use fleascope_rs::trigger_config::{DigitalTrigger, BitState, TriggerConfig};
 //!
 //! let trigger = DigitalTrigger::start_capturing_when()
 //!     .bit0(BitState::High)
@@ -46,43 +49,53 @@
 //!     .starts_matching();
 //!
 //! let trigger_fields = trigger.into_trigger_fields();
-//! println!("Digital trigger: {}", trigger_fields);
+//! println!("Digital trigger: {}", trigger_fields.into_string());
 //! ```
 //!
 //! ### Analog Trigger
 //!
 //! ```rust
-//! use fleascope_rs::trigger_config::AnalogTrigger;
+//! use fleascope_rs::{trigger_config::{AnalogTrigger, AnalogTriggerBehavior, TriggerConfig}};
 //!
-//! let trigger = AnalogTrigger::start_capturing_when()
-//!     .rising_edge(1.5);
-//!
-//! let voltage_to_raw = |v: f64| v * 100.0;
-//! let trigger_fields = trigger.into_trigger_fields(voltage_to_raw).unwrap();
-//! println!("Analog trigger: {}", trigger_fields);
+//! // Create analog trigger directly with raw ADC value
+//! let trigger = AnalogTrigger::new(500, AnalogTriggerBehavior::Rising);
+//! let trigger_fields = trigger.into_trigger_fields();
+//! println!("Analog trigger: {}", trigger_fields.into_string());
 //! ```
 //!
 //! ### Data Acquisition with Triggers
 //!
 //! ```rust,no_run
-//! use fleascope_rs::{FleaScope, ProbeType, DigitalTrigger, AnalogTrigger, Trigger, BitState};
+//! use fleascope_rs::{IdleFleaScope, DigitalTrigger, AnalogTrigger, BitState};
+//! use fleascope_rs::trigger_config::{AnalogTriggerBehavior, TriggerConfig};
 //! use std::time::Duration;
 //!
-//! let mut scope = FleaScope::connect(None, None, true)?;
+//! let (mut scope, x1_probe, x10_probe) = IdleFleaScope::connect(None, None, true)?;
 //!
-//! // Read with unified trigger API - digital trigger using 1x probe
+//! // Read with digital trigger
 //! let digital_trigger = DigitalTrigger::start_capturing_when()
 //!     .bit0(BitState::High)
-//!     .starts_matching();
-//! let data = scope.read(ProbeType::X1, Duration::from_millis(5), Some(digital_trigger.into()), None)?;
+//!     .starts_matching()
+//!     .into_trigger_fields();
+//! let reading = scope.read_sync(Duration::from_millis(5), digital_trigger, None)?;
+//! let data = reading.parse_csv()?;
 //!
-//! // Read with unified trigger API - analog trigger using 10x probe  
-//! let analog_trigger = AnalogTrigger::start_capturing_when()
-//!     .rising_edge(2.0);
-//! let data = scope.read(ProbeType::X10, Duration::from_millis(10), Some(analog_trigger.into()), Some(Duration::from_micros(500)))?;
+//! // Read with analog trigger (using raw ADC value)
+//! let analog_trigger = AnalogTrigger::new(500, AnalogTriggerBehavior::Rising)
+//!     .into_trigger_fields();
+//! let reading = scope.read_sync(
+//!     Duration::from_millis(10),
+//!     analog_trigger,
+//!     Some(Duration::from_micros(500))
+//! )?;
+//! let data = reading.parse_csv()?;
 //!
-//! // You can also read without triggers (auto trigger)
-//! let data = scope.read(ProbeType::X1, Duration::from_millis(5), None, None)?;
+//! // You can also read without specific bit patterns (auto trigger)
+//! let auto_trigger = DigitalTrigger::start_capturing_when()
+//!     .is_matching()
+//!     .into_trigger_fields();
+//! let reading = scope.read_sync(Duration::from_millis(5), auto_trigger, None)?;
+//! let data = reading.parse_csv()?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
