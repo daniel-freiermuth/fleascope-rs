@@ -54,6 +54,12 @@ pub enum CaptureConfigError {
     #[error("Voltage out of range")]
     VoltageOutOfRange,
 
+    #[error("Invalid digital channel mask {0:#x} (must be non-zero and within 0x1ff)")]
+    InvalidChannelMask(u16),
+
+    #[error("Invalid samples per packet {requested} (must be 1..={max} for this channel mask)")]
+    InvalidSamplesPerPacket { requested: u32, max: u32 },
+
     #[error("Serial terminal error: {0}")]
     SerialTerminal(#[from] FleaTerminalError),
 
@@ -242,6 +248,8 @@ impl IdleFleaScope {
     const MCU_MHZ: f64 = 120.0; // MCU clock frequency in MHz, used for calculations
     const INTERLEAVE: u32 = 5; // number of ADCs interleaved
     const TOTAL_SAMPLES: u32 = 2000;
+    /// Bits in one digital-stream packet: the firmware's 63-byte USB FS buffer.
+    const DIGITAL_PACKET_BITS: u32 = 63 * 8;
 
     /// Connect to a `FleaScope` device
     pub fn connect(
@@ -419,6 +427,83 @@ impl IdleFleaScope {
         }
     }
 
+    /// Start a digital bit-banging stream.
+    /// `n_samples_per_packet`: pre-agreed number of samples per packet; the
+    /// firmware packs exactly this many samples into each flush with no inline
+    /// header.  Use [`Self::compute_n_samples_per_packet`] to derive the value;
+    /// it must be in `1..=504 / popcount(channel_mask)` so a packet fits the
+    /// firmware's 63-byte buffer.
+    pub fn digital_stream(
+        self,
+        channel_mask: u16,
+        us_per_sample: u32,
+        n_samples_per_packet: u32,
+    ) -> Result<DigitalStreamingScope, (Self, CaptureConfigError)> {
+        let packet_bytes = match Self::digital_packet_bytes(channel_mask, n_samples_per_packet) {
+            Ok(packet_bytes) => packet_bytes,
+            Err(e) => return Err((self, e)),
+        };
+        let command =
+            format!("digital_stream 0x{channel_mask:x} {us_per_sample} {n_samples_per_packet}");
+        match self.serial.exec_async(&command) {
+            Ok(serial) => Ok(DigitalStreamingScope {
+                _ver: self._ver,
+                hostname: self.hostname,
+                channel_mask,
+                n_samples_per_packet: n_samples_per_packet as usize,
+                packet_bytes,
+                serial,
+            }),
+            Err((serial, e)) => Err((
+                Self {
+                    serial,
+                    _ver: self._ver,
+                    hostname: self.hostname,
+                },
+                e.into(),
+            )),
+        }
+    }
+
+    /// Bytes per digital-stream packet, after checking the parameters against
+    /// the firmware limits (9 channels, one 63-byte USB FS packet).
+    fn digital_packet_bytes(
+        channel_mask: u16,
+        n_samples_per_packet: u32,
+    ) -> Result<usize, CaptureConfigError> {
+        if channel_mask == 0 || channel_mask > 0x1ff {
+            return Err(CaptureConfigError::InvalidChannelMask(channel_mask));
+        }
+        let n_channels = channel_mask.count_ones();
+        let max = Self::DIGITAL_PACKET_BITS / n_channels;
+        if n_samples_per_packet == 0 || n_samples_per_packet > max {
+            return Err(CaptureConfigError::InvalidSamplesPerPacket {
+                requested: n_samples_per_packet,
+                max,
+            });
+        }
+        Ok((n_samples_per_packet * n_channels).div_ceil(8) as usize)
+    }
+
+    /// Compute the packet sample count that balances throughput vs host latency.
+    /// - Free-run (`us_per_sample == 0`): fill a full 63-byte USB FS packet.
+    /// - Configured rate: target ~50 ms per packet (T3 clamps to ≥114 Hz).
+    pub fn compute_n_samples_per_packet(channel_mask: u16, us_per_sample: u32) -> u32 {
+        let n_channels = channel_mask.count_ones().max(1);
+        let max_samples = Self::DIGITAL_PACKET_BITS / n_channels;
+        if us_per_sample == 0 {
+            return max_samples;
+        }
+        // T3 timer clamps at us_per_sample > 8738 → ~114 Hz actual.
+        let actual_rate_hz: u32 = if us_per_sample > 8738 {
+            114
+        } else {
+            1_000_000 / us_per_sample
+        };
+        let samples_50ms = (actual_rate_hz * 50 / 1000).max(1);
+        samples_50ms.min(max_samples)
+    }
+
     /// Set the hostname
     pub fn set_hostname(&mut self, hostname: &str) -> Result<(), FleaTerminalError> {
         self.serial
@@ -457,6 +542,64 @@ impl StreamingScope {
             .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .collect())
+    }
+}
+
+pub struct DigitalStreamingScope {
+    _ver: String,
+    hostname: String,
+    pub channel_mask: u16,
+    /// Pre-agreed samples per packet — no inline header in the wire format.
+    pub n_samples_per_packet: usize,
+    /// Bytes per packet = `ceil(n_samples_per_packet * popcount(channel_mask) / 8)`.
+    packet_bytes: usize,
+    serial: BusyFleaTerminal,
+}
+
+impl DigitalStreamingScope {
+    pub fn stop(self) -> Result<IdleFleaScope, FleaTerminalError> {
+        let serial = self.serial.cancel()?;
+        Ok(IdleFleaScope {
+            serial,
+            _ver: self._ver,
+            hostname: self.hostname,
+        })
+    }
+
+    /// Read one packet and decode it into per-sample bitmasks.
+    /// Reads exactly `packet_bytes` bytes (no header) and decodes
+    /// exactly `n_samples_per_packet` samples — zero-padded trailing bits
+    /// in the last byte are never decoded.
+    pub fn read_packet(&mut self) -> Result<Vec<u16>, std::io::Error> {
+        profiling::scope!("DigitalStreamingScope::read_packet");
+        let mut buffer = vec![0u8; self.packet_bytes];
+        self.serial.read_exact(&mut buffer)?;
+        Ok(Self::decode_packet(
+            &buffer,
+            self.channel_mask,
+            self.n_samples_per_packet,
+        ))
+    }
+
+    /// Unpack the firmware's LSB-first bit stream: sample `s`, active channel
+    /// `k` (in ascending channel order) is bit `s * popcount(mask) + k`.
+    fn decode_packet(buffer: &[u8], channel_mask: u16, n_samples: usize) -> Vec<u16> {
+        let n_channels = channel_mask.count_ones() as usize;
+        let active: Vec<usize> = (0..9).filter(|&i| channel_mask & (1 << i) != 0).collect();
+        let bit_set = |bit_idx: usize| {
+            buffer
+                .get(bit_idx / 8)
+                .is_some_and(|byte| (byte >> (bit_idx % 8)) & 1 != 0)
+        };
+        (0..n_samples)
+            .map(|s| {
+                active
+                    .iter()
+                    .enumerate()
+                    .filter(|&(ch_idx, _)| bit_set(s * n_channels + ch_idx))
+                    .fold(0u16, |mask, (_, &virt_ch)| mask | (1 << virt_ch))
+            })
+            .collect()
     }
 }
 
@@ -687,6 +830,60 @@ fn parse_calibration_reply(command: &str, reply: &[u8]) -> Result<i32, FleaTermi
 mod tests {
     use super::*;
     use crate::AnalogTrigger;
+
+    #[test]
+    fn digital_packet_bytes_enforces_firmware_limits() {
+        use CaptureConfigError::{InvalidChannelMask, InvalidSamplesPerPacket};
+        let bytes = IdleFleaScope::digital_packet_bytes;
+        assert!(matches!(bytes(0, 1), Err(InvalidChannelMask(0))));
+        assert!(matches!(bytes(0x200, 1), Err(InvalidChannelMask(0x200))));
+        // 9 channels: at most 504 / 9 = 56 samples fit 63 bytes.
+        assert_eq!(bytes(0x1ff, 56).unwrap(), 63);
+        assert!(matches!(
+            bytes(0x1ff, 57),
+            Err(InvalidSamplesPerPacket {
+                requested: 57,
+                max: 56
+            })
+        ));
+        assert!(matches!(
+            bytes(0x1, 0),
+            Err(InvalidSamplesPerPacket {
+                requested: 0,
+                max: 504
+            })
+        ));
+        // 3 channels × 5 samples = 15 bits → 2 bytes.
+        assert_eq!(bytes(0b101_0001, 5).unwrap(), 2);
+    }
+
+    #[test]
+    fn compute_n_samples_per_packet_stays_within_limits() {
+        let n = IdleFleaScope::compute_n_samples_per_packet;
+        // Free-run fills the packet.
+        assert_eq!(n(0x1ff, 0), 56);
+        assert_eq!(n(0x1, 0), 504);
+        // 1 kHz → 50 samples in 50 ms.
+        assert_eq!(n(0x1, 1000), 50);
+        // Capped by the packet size.
+        assert_eq!(n(0x1ff, 10), 56);
+        // Slower than the T3 clamp (> 8738 µs) runs at ~114 Hz → 5 samples.
+        assert_eq!(n(0x1, 100_000), 5);
+        // Never 0, and always accepted by digital_stream.
+        for (mask, us) in [(0x1, 1_000_000), (0x1ff, 0), (0x1ff, 8738), (0x3, 1)] {
+            assert!(IdleFleaScope::digital_packet_bytes(mask, n(mask, us)).is_ok());
+        }
+    }
+
+    #[test]
+    fn decode_packet_maps_lsb_first_bits_to_sparse_channels() {
+        // Channels 0, 4 and 8 active; firmware packs (ch0, ch4, ch8) per
+        // sample, LSB first. Samples: {ch0}, {ch4, ch8}, {all}, {}.
+        // Bit stream (index 0 first): 1 0 0 | 0 1 1 | 1 1 1 | 0 0 0
+        // → byte 0 = bits 0..=7 = 0b1111_0001, byte 1 = bit 8 = 0b0000_0001.
+        let decoded = DigitalStreamingScope::decode_packet(&[0b1111_0001, 0b0000_0001], 0x111, 4);
+        assert_eq!(decoded, [0x001, 0x110, 0x111, 0x000]);
+    }
 
     #[test]
     fn test_waveform_as_str() {
