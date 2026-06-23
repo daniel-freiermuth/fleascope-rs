@@ -136,7 +136,9 @@ pub use trigger_config::{
     DigitalTrigger, DigitalTriggerBehavior, Trigger,
 };
 
-pub use serial_terminal::{FleaTerminalError, IdleFleaTerminal, StatelessFleaTerminal};
+pub use serial_terminal::{
+    FleaTerminalError, FlashProgress, FlashUpgradeError, IdleFleaTerminal, StatelessFleaTerminal,
+};
 
 pub use flea_connector::{FleaConnector, FleaConnectorError, FleaDevice};
 
