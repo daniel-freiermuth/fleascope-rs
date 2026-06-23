@@ -139,6 +139,6 @@ pub use serial_terminal::{
 pub use flea_connector::{FleaConnector, FleaConnectorError, FleaDevice};
 
 pub use flea_scope::{
-    FleaProbe, IdleFleaScope, ParseError, ProbeType, ReadStatus, ReadingFleaScope, ScopeReading,
-    Waveform,
+    DigitalStreamingScope, FleaProbe, IdleFleaScope, ParseError, ProbeType, ReadStatus,
+    ReadingFleaScope, ScopeReading, Waveform,
 };
