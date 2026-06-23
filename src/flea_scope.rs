@@ -369,6 +369,51 @@ impl IdleFleaScope {
         }
     }
 
+    /// Start a digital bit-banging stream.
+    /// `n_samples_per_packet`: pre-agreed number of samples per packet; the
+    /// firmware packs exactly this many samples into each flush with no inline
+    /// header.  Use [`Self::compute_n_samples_per_packet`] to derive the value.
+    pub fn digital_stream(
+        self,
+        channel_mask: u16,
+        us_per_sample: u32,
+        n_samples_per_packet: u32,
+    ) -> DigitalStreamingScope {
+        assert!(channel_mask != 0 && channel_mask <= 0x1ff);
+        let n_channels = channel_mask.count_ones() as usize;
+        let packet_bytes = (n_samples_per_packet as usize * n_channels + 7) / 8;
+        DigitalStreamingScope {
+            _ver: self._ver,
+            hostname: self.hostname,
+            channel_mask,
+            n_samples_per_packet: n_samples_per_packet as usize,
+            packet_bytes,
+            serial: self.serial.exec_async(&format!(
+                "digital_stream 0x{:x} {} {}",
+                channel_mask, us_per_sample, n_samples_per_packet
+            )),
+        }
+    }
+
+    /// Compute the packet sample count that balances throughput vs host latency.
+    /// - Free-run (`us_per_sample == 0`): fill a full 63-byte USB FS packet.
+    /// - Configured rate: target ~50 ms per packet (T3 clamps to ≥114 Hz).
+    pub fn compute_n_samples_per_packet(channel_mask: u16, us_per_sample: u32) -> u32 {
+        let n_channels = channel_mask.count_ones().max(1);
+        let max_samples = (63 * 8) / n_channels;
+        if us_per_sample == 0 {
+            return max_samples;
+        }
+        // T3 timer clamps at us_per_sample > 8738 → ~114 Hz actual.
+        let actual_rate_hz: u32 = if us_per_sample > 8738 {
+            114
+        } else {
+            1_000_000 / us_per_sample
+        };
+        let samples_50ms = (actual_rate_hz * 50 / 1000).max(1);
+        samples_50ms.min(max_samples)
+    }
+
     /// Set the hostname
     pub fn set_hostname(&mut self, hostname: &str) {
         self.serial.exec_sync(&format!("hostname {hostname}"), None);
@@ -405,6 +450,54 @@ impl StreamingScope {
             .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .collect())
+    }
+}
+
+pub struct DigitalStreamingScope {
+    _ver: String,
+    hostname: String,
+    pub channel_mask: u16,
+    /// Pre-agreed samples per packet — no inline header in the wire format.
+    pub n_samples_per_packet: usize,
+    /// Bytes per packet = ceil(n_samples_per_packet * popcount(channel_mask) / 8).
+    packet_bytes: usize,
+    serial: BusyFleaTerminal,
+}
+
+impl DigitalStreamingScope {
+    pub fn stop(self) -> IdleFleaScope {
+        let serial = self.serial.cancel();
+        IdleFleaScope {
+            serial,
+            _ver: self._ver,
+            hostname: self.hostname,
+        }
+    }
+
+    /// Read one packet and decode it into per-sample bitmasks.
+    /// Reads exactly `packet_bytes` bytes (no header) and decodes
+    /// exactly `n_samples_per_packet` samples — zero-padded trailing bits
+    /// in the last byte are never decoded.
+    pub fn read_packet(&mut self) -> Result<Vec<u16>, std::io::Error> {
+        profiling::scope!("DigitalStreamingScope::read_packet");
+        let mut buffer = vec![0u8; self.packet_bytes];
+        self.serial.read_exact(&mut buffer)?;
+
+        let n_channels = self.channel_mask.count_ones() as usize;
+        let active: Vec<usize> =
+            (0..9).filter(|&i| self.channel_mask & (1 << i) != 0).collect();
+        let mut result = Vec::with_capacity(self.n_samples_per_packet);
+        for s in 0..self.n_samples_per_packet {
+            let mut mask: u16 = 0;
+            for (ch_idx, &virt_ch) in active.iter().enumerate() {
+                let bit_idx = s * n_channels + ch_idx;
+                if (buffer[bit_idx / 8] >> (bit_idx % 8)) & 1 != 0 {
+                    mask |= 1 << virt_ch;
+                }
+            }
+            result.push(mask);
+        }
+        Ok(result)
     }
 }
 

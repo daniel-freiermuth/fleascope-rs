@@ -140,4 +140,4 @@ pub use serial_terminal::{FleaTerminalError, IdleFleaTerminal, StatelessFleaTerm
 
 pub use flea_connector::{FleaConnector, FleaConnectorError, FleaDevice};
 
-pub use flea_scope::{FleaProbe, IdleFleaScope, ProbeType, Waveform};
+pub use flea_scope::{DigitalStreamingScope, FleaProbe, IdleFleaScope, ProbeType, Waveform};
