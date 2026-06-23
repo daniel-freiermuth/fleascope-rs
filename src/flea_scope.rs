@@ -207,6 +207,22 @@ impl IdleFleaScope {
     const INTERLEAVE: u32 = 5; // number of ADCs interleaved
     const TOTAL_SAMPLES: u32 = 2000;
 
+    /// Default `sample_length` for the `stream` command.
+    ///
+    /// This is the raw timer-period register value (`PR3 + 1`) passed to the firmware.
+    /// It corresponds to the historical hardcoded value of `number1 = 70` at a 120 MHz
+    /// bus clock, yielding an ADC trigger frequency of roughly 51 kHz.
+    pub const STREAM_SAMPLE_LENGTH: u32 = 2333;
+
+    /// Default averaging factor for the `stream` command (1 = no averaging).
+    pub const STREAM_AVERAGING: u32 = 1;
+
+    /// Default bit-width per sample for the `stream` command.
+    ///
+    /// 16 means each sample occupies exactly two bytes in little-endian order,
+    /// matching the `u16` values returned by [`StreamingScope::read`].
+    pub const STREAM_BITWIDTH: u32 = 16;
+
     /// Connect to a `FleaScope` device
     pub fn connect(
         name: Option<&str>,
@@ -362,10 +378,16 @@ impl IdleFleaScope {
     }
 
     pub fn stream(self) -> StreamingScope {
+        let command = format!(
+            "stream {} {} {}",
+            Self::STREAM_SAMPLE_LENGTH,
+            Self::STREAM_AVERAGING,
+            Self::STREAM_BITWIDTH,
+        );
         StreamingScope {
             _ver: self._ver,
             hostname: self.hostname,
-            serial: self.serial.exec_async("stream"),
+            serial: self.serial.exec_async(&command),
         }
     }
 
