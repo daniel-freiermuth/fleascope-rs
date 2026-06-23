@@ -529,7 +529,7 @@ fn contains_from(haystack: &[u8], searched: usize, needle: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     #[test]
     fn prompt_window_single_byte_reads() {
@@ -947,8 +947,9 @@ mod tests {
     /// runs during its `ppoll` (EINTR). `upgrade` asks for HEX records
     /// without a prompt; HEX records get no reply, except the end-of-file
     /// record (`paste done!`) and `:BAD` (`upgrade failed`). `max_read` caps
-    /// the bytes per read, so a message can straddle reads.
-    struct FakeDevice {
+    /// the bytes per read, so a message can straddle reads. `ver_reply` is
+    /// what `ver` prints before its prompt.
+    pub(crate) struct FakeDevice {
         line: Vec<u8>,
         replies: std::cell::RefCell<VecDeque<u8>>,
         stall: usize,
@@ -960,10 +961,15 @@ mod tests {
         bytes_to_read_fails: bool,
         interrupted_reads: usize,
         max_read: usize,
+        pub(crate) ver_reply: &'static str,
     }
 
     impl FakeDevice {
-        fn new(ver_stall: usize, write_budget: Option<usize>, failed_writes: usize) -> Self {
+        pub(crate) fn new(
+            ver_stall: usize,
+            write_budget: Option<usize>,
+            failed_writes: usize,
+        ) -> Self {
             Self {
                 line: Vec::new(),
                 replies: std::cell::RefCell::new(VecDeque::new()),
@@ -976,6 +982,7 @@ mod tests {
                 bytes_to_read_fails: false,
                 interrupted_reads: 0,
                 max_read: usize::MAX,
+                ver_reply: "1.0",
             }
         }
     }
@@ -1024,10 +1031,12 @@ mod tests {
                 match b {
                     0x03 => self.line.clear(),
                     b'\n' => {
+                        let ver_reply;
                         let reply: &[u8] = match self.line.as_slice() {
                             b"ver" => {
                                 self.stall = self.ver_stall;
-                                b"1.0\r\n> "
+                                ver_reply = format!("{}\r\n> ", self.ver_reply);
+                                ver_reply.as_bytes()
                             }
                             b"hostname" => b"smoke\r\n> ",
                             b"upgrade" => b"paste HEX upgrade file now\r\n",
@@ -1134,7 +1143,7 @@ mod tests {
         }
     }
 
-    fn idle_fake_device(device: FakeDevice) -> IdleFleaTerminal {
+    pub(crate) fn idle_fake_device(device: FakeDevice) -> IdleFleaTerminal {
         IdleFleaTerminal::new(StatelessFleaTerminal {
             serial: Box::new(device),
         })
@@ -1352,6 +1361,30 @@ mod tests {
         idle.flash_upgrade(&records, |p| progress.push((p.sent, p.total)))
             .expect("flash_upgrade");
         assert_eq!(progress, [(1, 3), (2, 3), (3, 3)]);
+    }
+
+    /// Flashing tools connect at the terminal layer, below `IdleFleaScope`'s
+    /// firmware version check, so they can upgrade devices whose firmware the
+    /// scope API no longer supports. Fails if a version check moves down here.
+    #[test]
+    fn flash_upgrade_works_on_unsupported_firmware_versions() {
+        for ver in [
+            "2.27g (checksum 0x7c8e)",
+            "3.1.0 (checksum 0x2e47)",
+            "9.0.0",
+        ] {
+            let mut device = FakeDevice::new(0, None, 0);
+            device.ver_reply = ver;
+            let stateless = StatelessFleaTerminal {
+                serial: Box::new(device),
+            };
+            let mut idle = match IdleFleaTerminal::try_from(stateless) {
+                Ok(idle) => idle,
+                Err((_, e)) => panic!("{ver}: connecting failed: {e}"),
+            };
+            idle.flash_upgrade(&[":10000000DEADBEEF", ":00000001FF"], |_| {})
+                .unwrap_or_else(|e| panic!("{ver}: flash_upgrade failed: {e}"));
+        }
     }
 
     #[test]

@@ -251,6 +251,51 @@ impl IdleFleaScope {
     const INTERLEAVE: u32 = 5; // number of ADCs interleaved
     const TOTAL_SAMPLES: u32 = 2000;
 
+    /// Supported firmware versions: `MIN_FIRMWARE_VERSION <= v < MAX_FIRMWARE_VERSION`.
+    ///
+    /// The firmware follows Semantic Versioning: MAJOR bumps on breaking wire-protocol
+    /// changes, MINOR on backwards-compatible additions, PATCH on bug fixes. The driver
+    /// therefore accepts one major version, from the minor it relies on upwards.
+    pub const MIN_FIRMWARE_VERSION: (u32, u32, u32) = (3, 0, 0);
+    /// First firmware version that is no longer supported (next major).
+    pub const MAX_FIRMWARE_VERSION: (u32, u32, u32) = (4, 0, 0);
+
+    fn check_firmware_version(version: (u32, u32, u32)) -> Result<(), FleaConnectorError> {
+        if (Self::MIN_FIRMWARE_VERSION..Self::MAX_FIRMWARE_VERSION).contains(&version) {
+            return Ok(());
+        }
+        let fmt = |(maj, min, pat): (u32, u32, u32)| format!("{maj}.{min}.{pat}");
+        Err(FleaConnectorError::UnsupportedFirmware {
+            found: fmt(version),
+            supported: format!(
+                ">={}, <{}",
+                fmt(Self::MIN_FIRMWARE_VERSION),
+                fmt(Self::MAX_FIRMWARE_VERSION)
+            ),
+        })
+    }
+
+    /// Parse the `ver` command output into a `(major, minor, patch)` triple.
+    ///
+    /// Current firmware emits `"MAJOR.MINOR.PATCH (checksum 0x…)\n"`. The
+    /// hand-tracked 2.x releases printed `2.27` or `2.27a`…`2.27k`; those parse
+    /// as `(2, 27, 0)` (a letter suffix and a missing patch are ignored) so they
+    /// are reported as unsupported rather than unparseable.
+    fn parse_firmware_version(ver_output: &str) -> Option<(u32, u32, u32)> {
+        fn leading_number(part: &str) -> Option<u32> {
+            let end = part
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(part.len());
+            part.get(..end)?.parse().ok()
+        }
+        let version_str = ver_output.split_whitespace().next()?;
+        let mut parts = version_str.split('.');
+        let major: u32 = parts.next()?.parse().ok()?;
+        let minor = leading_number(parts.next()?)?;
+        let patch = parts.next().map_or(Some(0), leading_number)?;
+        Some((major, minor, patch))
+    }
+
     /// Connect to a `FleaScope` device
     pub fn connect(
         name: Option<&str>,
@@ -269,21 +314,31 @@ impl IdleFleaScope {
         Ok((scope, x1, x10))
     }
 
-    /// Create a new `FleaScope` from an existing terminal connection
-    pub fn new(mut serial: IdleFleaTerminal) -> Result<Self, FleaTerminalError> {
+    /// Create a new `FleaScope` from an existing terminal connection.
+    ///
+    /// Returns `Err` if a terminal command fails, if the firmware version reported by
+    /// the device cannot be parsed, or if it is outside
+    /// [`Self::MIN_FIRMWARE_VERSION`]`..`[`Self::MAX_FIRMWARE_VERSION`].
+    pub fn new(mut serial: IdleFleaTerminal) -> Result<Self, FleaConnectorError> {
         log::debug!("Turning off echo");
         serial.exec_sync("echo off", Some(COMMAND_TIMEOUT))?;
 
         let ver =
             String::from_utf8_lossy(&serial.exec_sync("ver", Some(COMMAND_TIMEOUT))?).into_owned();
         log::debug!("FleaScope version: {ver}");
-        // TODO: check if version is compatible
+
+        let version = Self::parse_firmware_version(&ver).ok_or_else(|| {
+            FleaConnectorError::FirmwareVersionUnparseable {
+                raw: ver.trim().to_string(),
+            }
+        })?;
+
+        Self::check_firmware_version(version)?;
 
         let hostname =
             String::from_utf8_lossy(&serial.exec_sync("hostname", Some(COMMAND_TIMEOUT))?)
                 .into_owned();
         log::debug!("FleaScope hostname: {hostname}");
-        // TODO: check if hostname is correct
 
         Ok(Self {
             serial,
@@ -952,11 +1007,82 @@ mod tests {
         });
         // `echo off` must give up after COMMAND_TIMEOUT; allow generous slack.
         match rx.recv_timeout(Duration::from_secs(15)) {
-            Ok(Some(FleaTerminalError::Timeout { timeout })) => {
+            Ok(Some(FleaConnectorError::SerialTerminal(FleaTerminalError::Timeout {
+                timeout,
+            }))) => {
                 assert_eq!(timeout, COMMAND_TIMEOUT);
             }
             Ok(other) => panic!("expected Timeout error, got {other:?}"),
             Err(_) => panic!("IdleFleaScope::new() did not return within 15s on a silent device"),
         }
+    }
+
+    #[test]
+    fn test_parse_firmware_version() {
+        let parse = IdleFleaScope::parse_firmware_version;
+        // Current firmware: `VERSION " (checksum 0x%x)"` (cpustick/basic0.c).
+        assert_eq!(parse("3.1.0 (checksum 0x1a2b)\n"), Some((3, 1, 0)));
+        // Hand-tracked 2.x releases (fleascope-fw CHANGELOG).
+        assert_eq!(parse("2.27g (checksum 0x7c8e)\n"), Some((2, 27, 0)));
+        assert_eq!(parse("2.27 (checksum 0x0)\n"), Some((2, 27, 0)));
+        assert_eq!(parse("invalid"), None);
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("3"), None);
+        assert_eq!(parse("3.x.0"), None);
+    }
+
+    fn connect_with_version(ver: &'static str) -> Result<IdleFleaScope, FleaConnectorError> {
+        use crate::serial_terminal::tests::{FakeDevice, idle_fake_device};
+        let mut device = FakeDevice::new(0, None, 0);
+        device.ver_reply = ver;
+        IdleFleaScope::new(idle_fake_device(device))
+    }
+
+    #[test]
+    fn new_accepts_supported_firmware() {
+        let scope = connect_with_version("3.0.0 (checksum 0x1a2b)").expect("3.0.0 accepted");
+        assert_eq!(scope.hostname, "smoke");
+    }
+
+    #[test]
+    fn new_rejects_unsupported_firmware() {
+        for (ver, found) in [
+            ("2.27g (checksum 0x7c8e)", "2.27.0"),
+            ("2.27k (checksum 0x1)", "2.27.0"),
+            ("4.0.0 (checksum 0x1)", "4.0.0"),
+        ] {
+            match connect_with_version(ver) {
+                Err(FleaConnectorError::UnsupportedFirmware { found: f, .. }) => {
+                    assert_eq!(f, found, "{ver}");
+                }
+                Err(e) => panic!("{ver}: unexpected error {e}"),
+                Ok(_) => panic!("{ver}: accepted"),
+            }
+        }
+    }
+
+    #[test]
+    fn new_reports_unparseable_firmware() {
+        assert!(matches!(
+            connect_with_version("garbage"),
+            Err(FleaConnectorError::FirmwareVersionUnparseable { raw }) if raw == "garbage"
+        ));
+    }
+
+    #[test]
+    fn firmware_version_must_be_major_3() {
+        let ok = |v| IdleFleaScope::check_firmware_version(v).is_ok();
+        assert!(ok((3, 0, 0)));
+        assert!(ok((3, 1, 0)));
+        assert!(ok((3, 7, 2)));
+        assert!(ok((3, 99, 99)));
+        assert!(!ok((2, 99, 99)));
+        assert!(!ok((4, 0, 0)));
+        assert!(!ok((5, 1, 0)));
+        assert!(matches!(
+            IdleFleaScope::check_firmware_version((4, 0, 0)),
+            Err(FleaConnectorError::UnsupportedFirmware { found, supported })
+                if found == "4.0.0" && supported == ">=3.0.0, <4.0.0"
+        ));
     }
 }
