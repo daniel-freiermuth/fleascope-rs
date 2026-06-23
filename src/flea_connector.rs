@@ -26,6 +26,12 @@ pub enum FleaConnectorError {
 
     #[error("Device validation failed")]
     DeviceValidationFailed,
+
+    #[error("Firmware version {found} is too old; minimum required is {minimum}")]
+    FirmwareTooOld { found: String, minimum: String },
+
+    #[error("Could not parse firmware version string: {raw:?}")]
+    FirmwareVersionUnparseable { raw: String },
 }
 
 pub struct FleaConnector;

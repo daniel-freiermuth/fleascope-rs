@@ -223,6 +223,26 @@ impl IdleFleaScope {
     /// matching the `u16` values returned by [`StreamingScope::read`].
     pub const STREAM_BITWIDTH: u32 = 16;
 
+    /// Minimum firmware version `(major, minor, patch)` required by this driver.
+    ///
+    /// The firmware follows Semantic Versioning: MAJOR bumps on breaking wire-protocol
+    /// changes, MINOR on backwards-compatible additions, PATCH on bug fixes.
+    /// Bump this constant whenever the driver starts relying on a newer protocol feature.
+    pub const MIN_FIRMWARE_VERSION: (u32, u32, u32) = (2, 0, 0);
+
+    /// Parse the `ver` command output into a `(major, minor, patch)` triple.
+    ///
+    /// The firmware emits `"MAJOR.MINOR.PATCH (checksum 0x…)\n"`;
+    /// this function takes the first whitespace-delimited token and splits on `.`.
+    fn parse_firmware_version(ver_output: &str) -> Option<(u32, u32, u32)> {
+        let version_str = ver_output.split_whitespace().next()?;
+        let mut parts = version_str.split('.');
+        let major: u32 = parts.next()?.parse().ok()?;
+        let minor: u32 = parts.next()?.parse().ok()?;
+        let patch: u32 = parts.next()?.parse().ok()?;
+        Some((major, minor, patch))
+    }
+
     /// Connect to a `FleaScope` device
     pub fn connect(
         name: Option<&str>,
@@ -233,7 +253,7 @@ impl IdleFleaScope {
         let mut x1 = FleaProbe::new(ProbeType::X1);
         let mut x10 = FleaProbe::new(ProbeType::X10);
 
-        let mut scope = Self::new(serial);
+        let mut scope = Self::new(serial)?;
         if read_calibrations {
             x1.read_calibration_from_flash(&mut scope.serial);
             x10.read_calibration_from_flash(&mut scope.serial);
@@ -241,25 +261,42 @@ impl IdleFleaScope {
         Ok((scope, x1, x10))
     }
 
-    /// Create a new `FleaScope` from an existing terminal connection
-    pub fn new(mut serial: IdleFleaTerminal) -> Self {
+    /// Create a new `FleaScope` from an existing terminal connection.
+    ///
+    /// Returns `Err` if the firmware version reported by the device is older than
+    /// [`Self::MIN_FIRMWARE_VERSION`], or if the version string cannot be parsed.
+    pub fn new(mut serial: IdleFleaTerminal) -> Result<Self, FleaConnectorError> {
         log::debug!("Turning off echo");
         serial.exec_sync("echo off", None);
 
-        let ver = String::from_utf8(serial.exec_sync("ver", None)).expect("Failed to read version");
-        log::debug!("FleaScope version: {ver}");
-        // TODO: check if version is compatible
+        let ver_raw =
+            String::from_utf8(serial.exec_sync("ver", None)).expect("Failed to read version");
+        log::debug!("FleaScope version: {ver_raw}");
+
+        let version = Self::parse_firmware_version(&ver_raw).ok_or_else(|| {
+            FleaConnectorError::FirmwareVersionUnparseable {
+                raw: ver_raw.trim().to_string(),
+            }
+        })?;
+
+        let (min_maj, min_min, min_pat) = Self::MIN_FIRMWARE_VERSION;
+        if version < Self::MIN_FIRMWARE_VERSION {
+            let (maj, min, pat) = version;
+            return Err(FleaConnectorError::FirmwareTooOld {
+                found: format!("{maj}.{min}.{pat}"),
+                minimum: format!("{min_maj}.{min_min}.{min_pat}"),
+            });
+        }
 
         let hostname =
             String::from_utf8(serial.exec_sync("hostname", None)).expect("Failed to read hostname");
         log::debug!("FleaScope hostname: {hostname}");
-        // TODO: check if hostname is correct
 
-        Self {
+        Ok(Self {
             serial,
-            _ver: ver,
+            _ver: ver_raw,
             hostname,
-        }
+        })
     }
 
     /// Set the waveform generator
@@ -745,5 +782,52 @@ mod tests {
     fn test_number1_to_prescaler() {
         assert!(IdleFleaScope::number1_to_prescaler(100).is_ok());
         assert!(IdleFleaScope::number1_to_prescaler(0).is_err());
+    }
+
+    #[test]
+    fn test_parse_firmware_version() {
+        // Typical firmware output: "2.27.1 (checksum 0xdeadbeef)\n"
+        assert_eq!(
+            IdleFleaScope::parse_firmware_version("2.27.1 (checksum 0xdeadbeef)\n"),
+            Some((2, 27, 1))
+        );
+        // No checksum suffix
+        assert_eq!(
+            IdleFleaScope::parse_firmware_version("1.2.3\n"),
+            Some((1, 2, 3))
+        );
+        // Garbage input
+        assert_eq!(IdleFleaScope::parse_firmware_version("invalid"), None);
+        // Empty string
+        assert_eq!(IdleFleaScope::parse_firmware_version(""), None);
+        // Only two components
+        assert_eq!(IdleFleaScope::parse_firmware_version("1.2"), None);
+    }
+
+    #[test]
+    fn test_firmware_version_ordering() {
+        let min = IdleFleaScope::MIN_FIRMWARE_VERSION;
+
+        // Current firmware (3.0.0) must satisfy the minimum
+        assert!((3, 0, 0) >= min);
+
+        // Versions below the minimum must be rejected
+        let (maj, min_v, pat) = min;
+        if maj > 0 {
+            assert!((maj - 1, 99, 99) < min);
+        }
+        // Patch bump below minor still fails
+        if min_v > 0 {
+            assert!((maj, min_v - 1, 99) < min);
+        }
+        // Same major.minor, lower patch
+        if pat > 0 {
+            assert!((maj, min_v, pat - 1) < min);
+        }
+
+        // Versions at or above must pass
+        assert!((maj, min_v, pat) >= min);
+        assert!((maj, min_v, pat + 1) >= min);
+        assert!((maj + 1, 0, 0) >= min);
     }
 }
