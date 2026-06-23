@@ -23,6 +23,12 @@ pub enum FleaConnectorError {
         "No FleaScope device {name} found. Please connect a FleaScope or specify the port manually"
     )]
     DeviceNotFound { name: String },
+
+    #[error("Firmware version {found} is too old; minimum required is {minimum}")]
+    FirmwareTooOld { found: String, minimum: String },
+
+    #[error("Could not parse firmware version string: {raw:?}")]
+    FirmwareVersionUnparseable { raw: String },
 }
 
 pub struct FleaConnector;
