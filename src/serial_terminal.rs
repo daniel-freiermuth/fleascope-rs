@@ -217,8 +217,10 @@ pub struct BusyFleaTerminal {
 }
 
 impl BusyFleaTerminal {
-    pub fn cancel(mut self) -> Result<IdleFleaTerminal, ConnectionLostError> {
+    pub fn cancel(mut self) -> Result<IdleFleaTerminal, FleaTerminalError> {
         self.inner.send_ctrl_c().expect("Failed to send CTRL-C");
+        const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+        let cancel_start = Instant::now();
         const PROMPT_LEN: usize = PROMPT.len();
         const BUFFER_LEN: usize = 1024;
         let mut prompt_buffer = VecDeque::with_capacity(PROMPT_LEN);
@@ -234,8 +236,12 @@ impl BusyFleaTerminal {
                 }
                 Ok(_) => continue, // No data available right now, but no error
                 Err(e) if e.kind() == ErrorKind::TimedOut => continue, // Timeout is expected in non-blocking reads
-                Err(e) if e.kind() == ErrorKind::BrokenPipe => return Err(ConnectionLostError),
-                Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Err(ConnectionLostError),
+                Err(e) if e.kind() == ErrorKind::BrokenPipe => {
+                    return Err(FleaTerminalError::ConnectionLost)
+                }
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                    return Err(FleaTerminalError::ConnectionLost)
+                }
                 Err(e) => panic!("Serial read error: {e}"),
             }
             // Check if we have the prompt at the end
@@ -243,6 +249,11 @@ impl BusyFleaTerminal {
                 && prompt_buffer.iter().copied().eq(PROMPT.iter().copied())
             {
                 break;
+            }
+            if cancel_start.elapsed() >= CANCEL_TIMEOUT {
+                return Err(FleaTerminalError::Timeout {
+                    timeout: CANCEL_TIMEOUT,
+                });
             }
         }
         self.inner.flush().expect("Failed to flush serial port");
