@@ -142,10 +142,21 @@ impl StatelessFleaTerminal {
             }
         }
 
-        // Remove the prompt from the end and convert to string
+        // Remove the prompt from the end
         let response_without_prompt = &response[..response.len() - PROMPT.len()];
 
-        Ok(response_without_prompt.to_vec())
+        // Trim leading/trailing ASCII whitespace (command echo, \r\n)
+        let start = response_without_prompt
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .unwrap_or(response_without_prompt.len());
+        let end = response_without_prompt
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map_or(start, |i| i + 1);
+        let trimmed = response_without_prompt[start..end].to_vec();
+
+        Ok(trimmed)
     }
 
     /// Send CTRL-C character
@@ -253,11 +264,21 @@ impl BusyFleaTerminal {
     fn into_result(self) -> (Vec<u8>, IdleFleaTerminal) {
         profiling::scope!("BusyFleaTerminal::into_result");
 
-        // Remove the prompt from the end and convert to string
+        // Remove the prompt from the end
         let response_without_prompt = &self.response[..self.response.len() - PROMPT.len()];
-        let response_str = response_without_prompt.to_vec();
 
-        (response_str, IdleFleaTerminal { inner: self.inner })
+        // Trim leading/trailing ASCII whitespace (command echo, \r\n)
+        let start = response_without_prompt
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .unwrap_or(response_without_prompt.len());
+        let end = response_without_prompt
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .map_or(start, |i| i + 1);
+        let trimmed = response_without_prompt[start..end].to_vec();
+
+        (trimmed, IdleFleaTerminal { inner: self.inner })
     }
 
     pub fn try_get_result(
