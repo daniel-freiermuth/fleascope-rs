@@ -291,13 +291,9 @@ impl Read for BusyFleaTerminal {
 }
 
 fn prompt_window_extend(buf: &mut VecDeque<u8>, new: &[u8], window_len: usize) {
-    if new.len() >= window_len {
-        *buf = VecDeque::from(new[new.len() - window_len..].to_vec());
-    } else {
-        for _i in 0..new.len() {
-            buf.pop_front();
-        }
-        buf.extend(new);
+    buf.extend(new);
+    while buf.len() > window_len {
+        buf.pop_front();
     }
 }
 
