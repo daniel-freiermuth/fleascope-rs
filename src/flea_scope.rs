@@ -1,5 +1,5 @@
 use crate::flea_connector::{FleaConnector, FleaConnectorError};
-use crate::serial_terminal::{BusyFleaTerminal, ConnectionLostError, IdleFleaTerminal};
+use crate::serial_terminal::{BusyFleaTerminal, ConnectionLostError, FleaTerminalError, IdleFleaTerminal};
 use crate::trigger_config::{DigitalTrigger, StringifiedTriggerConfig, TriggerConfig};
 use polars::prelude::*;
 use std::io::Read;
@@ -184,7 +184,7 @@ impl ReadingFleaScope {
             Err(e) => Err(e),
         }
     }
-    pub fn cancel(self) -> Result<IdleFleaScope, ConnectionLostError> {
+    pub fn cancel(self) -> Result<IdleFleaScope, FleaTerminalError> {
         let idle_serial = self.serial.cancel()?;
         Ok(IdleFleaScope {
             serial: idle_serial,
@@ -388,7 +388,7 @@ pub struct StreamingScope {
 }
 
 impl StreamingScope {
-    pub fn stop(self) -> Result<IdleFleaScope, ConnectionLostError> {
+    pub fn stop(self) -> Result<IdleFleaScope, FleaTerminalError> {
         let serial = self.serial.cancel()?;
         Ok(IdleFleaScope {
             serial,
