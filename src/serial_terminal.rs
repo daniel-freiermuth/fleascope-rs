@@ -225,15 +225,12 @@ impl BusyFleaTerminal {
         let mut read_buffer = [0u8; BUFFER_LEN];
         loop {
             match self.inner.serial.read(&mut read_buffer) {
-                Ok(bytes_read) if bytes_read >= PROMPT_LEN => {
-                    prompt_buffer =
-                        VecDeque::from(read_buffer[bytes_read - PROMPT_LEN..bytes_read].to_vec());
-                }
                 Ok(bytes_read) if bytes_read > 0 => {
-                    for _i in 0..bytes_read {
-                        prompt_buffer.pop_front();
-                    }
-                    prompt_buffer.extend(&read_buffer[..bytes_read]);
+                    prompt_window_extend(
+                        &mut prompt_buffer,
+                        &read_buffer[..bytes_read],
+                        PROMPT_LEN,
+                    );
                 }
                 Ok(_) => continue, // No data available right now, but no error
                 Err(e) if e.kind() == ErrorKind::TimedOut => continue, // Timeout is expected in non-blocking reads
@@ -290,5 +287,49 @@ impl Read for BusyFleaTerminal {
         profiling::scope!("BusyFleaTerminal::read");
 
         self.inner.serial.read(buffer)
+    }
+}
+
+fn prompt_window_extend(buf: &mut VecDeque<u8>, new: &[u8], window_len: usize) {
+    if new.len() >= window_len {
+        *buf = VecDeque::from(new[new.len() - window_len..].to_vec());
+    } else {
+        for _i in 0..new.len() {
+            buf.pop_front();
+        }
+        buf.extend(new);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn prompt_window_single_byte_reads() {
+        let mut buf = VecDeque::new();
+        prompt_window_extend(&mut buf, b">", PROMPT.len());
+        prompt_window_extend(&mut buf, b" ", PROMPT.len());
+        assert_eq!(buf.len(), PROMPT.len(), "must reach PROMPT_LEN");
+        assert!(buf.iter().copied().eq(PROMPT.iter().copied()));
+    }
+    #[test]
+    fn prompt_window_slides_through_junk() {
+        let mut buf = VecDeque::new();
+        for &b in b"XY> " { prompt_window_extend(&mut buf, std::slice::from_ref(&b), PROMPT.len()); }
+        assert_eq!(buf.len(), PROMPT.len());
+        assert!(buf.iter().copied().eq(PROMPT.iter().copied()));
+    }
+    #[test]
+    fn prompt_window_large_read() {
+        let mut buf = VecDeque::new();
+        prompt_window_extend(&mut buf, b"ok\r\n> ", PROMPT.len());
+        assert!(buf.iter().copied().eq(PROMPT.iter().copied()));
+    }
+    #[test]
+    fn prompt_window_straddles_reads() {
+        let mut buf = VecDeque::new();
+        prompt_window_extend(&mut buf, b"data>", PROMPT.len());
+        prompt_window_extend(&mut buf, b" ", PROMPT.len());
+        assert!(buf.iter().copied().eq(PROMPT.iter().copied()));
     }
 }
