@@ -217,7 +217,7 @@ pub struct BusyFleaTerminal {
 }
 
 impl BusyFleaTerminal {
-    pub fn cancel(mut self) -> IdleFleaTerminal {
+    pub fn cancel(mut self) -> Result<IdleFleaTerminal, ConnectionLostError> {
         self.inner.send_ctrl_c().expect("Failed to send CTRL-C");
         const PROMPT_LEN: usize = PROMPT.len();
         const BUFFER_LEN: usize = 1024;
@@ -234,6 +234,8 @@ impl BusyFleaTerminal {
                 }
                 Ok(_) => continue, // No data available right now, but no error
                 Err(e) if e.kind() == ErrorKind::TimedOut => continue, // Timeout is expected in non-blocking reads
+                Err(e) if e.kind() == ErrorKind::BrokenPipe => return Err(ConnectionLostError),
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Err(ConnectionLostError),
                 Err(e) => panic!("Serial read error: {e}"),
             }
             // Check if we have the prompt at the end
@@ -244,7 +246,7 @@ impl BusyFleaTerminal {
             }
         }
         self.inner.flush().expect("Failed to flush serial port");
-        IdleFleaTerminal { inner: self.inner }
+        Ok(IdleFleaTerminal { inner: self.inner })
     }
 
     fn into_result(self) -> (Vec<u8>, IdleFleaTerminal) {
