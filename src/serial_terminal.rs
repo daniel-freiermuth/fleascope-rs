@@ -229,7 +229,7 @@ pub struct BusyFleaTerminal {
 
 impl BusyFleaTerminal {
     pub fn cancel(mut self) -> Result<IdleFleaTerminal, FleaTerminalError> {
-        self.inner.send_ctrl_c().expect("Failed to send CTRL-C");
+        self.inner.send_ctrl_c()?;
         const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
         let cancel_start = Instant::now();
         const PROMPT_LEN: usize = PROMPT.len();
@@ -267,7 +267,7 @@ impl BusyFleaTerminal {
                 });
             }
         }
-        self.inner.flush().expect("Failed to flush serial port");
+        self.inner.flush()?;
         Ok(IdleFleaTerminal { inner: self.inner })
     }
 
@@ -480,6 +480,160 @@ mod tests {
             }
             Ok(other) => panic!("expected Timeout error, got {other:?}"),
             Err(_) => panic!("cancel() did not return within 15s on a silent device"),
+        }
+    }
+
+    /// Serial port as `serialport` reports it after a USB unplug: once the
+    /// tty is hung up, `poll` sees POLLHUP so read/write fail with
+    /// `BrokenPipe`, and `tcflush` fails with EIO (`ErrorKind::Unknown`).
+    /// `pending` bytes are delivered before reads start failing, and
+    /// `writable` keeps writes alive to model an unplug later in `cancel()`.
+    struct UnpluggedPort {
+        writable: bool,
+        pending: Vec<u8>,
+    }
+
+    impl Read for UnpluggedPort {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pending.is_empty() {
+                return Err(ErrorKind::BrokenPipe.into());
+            }
+            let n = self.pending.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            Ok(n)
+        }
+    }
+
+    impl Write for UnpluggedPort {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.writable {
+                Ok(buf.len())
+            } else {
+                Err(ErrorKind::BrokenPipe.into())
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SerialPort for UnpluggedPort {
+        fn clear(&self, _: serialport::ClearBuffer) -> serialport::Result<()> {
+            Err(serialport::Error::new(
+                serialport::ErrorKind::Unknown,
+                "I/O error",
+            ))
+        }
+        fn bytes_to_read(&self) -> serialport::Result<u32> {
+            Err(serialport::Error::new(
+                serialport::ErrorKind::Unknown,
+                "I/O error",
+            ))
+        }
+        fn name(&self) -> Option<String> {
+            unreachable!()
+        }
+        fn baud_rate(&self) -> serialport::Result<u32> {
+            unreachable!()
+        }
+        fn data_bits(&self) -> serialport::Result<serialport::DataBits> {
+            unreachable!()
+        }
+        fn flow_control(&self) -> serialport::Result<serialport::FlowControl> {
+            unreachable!()
+        }
+        fn parity(&self) -> serialport::Result<serialport::Parity> {
+            unreachable!()
+        }
+        fn stop_bits(&self) -> serialport::Result<serialport::StopBits> {
+            unreachable!()
+        }
+        fn timeout(&self) -> Duration {
+            unreachable!()
+        }
+        fn set_baud_rate(&mut self, _: u32) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn set_data_bits(&mut self, _: serialport::DataBits) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn set_flow_control(&mut self, _: serialport::FlowControl) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn set_parity(&mut self, _: serialport::Parity) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn set_stop_bits(&mut self, _: serialport::StopBits) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn set_timeout(&mut self, _: Duration) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn write_request_to_send(&mut self, _: bool) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn write_data_terminal_ready(&mut self, _: bool) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn read_clear_to_send(&mut self) -> serialport::Result<bool> {
+            unreachable!()
+        }
+        fn read_data_set_ready(&mut self) -> serialport::Result<bool> {
+            unreachable!()
+        }
+        fn read_ring_indicator(&mut self) -> serialport::Result<bool> {
+            unreachable!()
+        }
+        fn read_carrier_detect(&mut self) -> serialport::Result<bool> {
+            unreachable!()
+        }
+        fn bytes_to_write(&self) -> serialport::Result<u32> {
+            unreachable!()
+        }
+        fn try_clone(&self) -> serialport::Result<Box<dyn SerialPort>> {
+            unreachable!()
+        }
+        fn set_break(&self) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn clear_break(&self) -> serialport::Result<()> {
+            unreachable!()
+        }
+    }
+
+    fn busy_terminal(port: UnpluggedPort) -> BusyFleaTerminal {
+        BusyFleaTerminal {
+            inner: StatelessFleaTerminal {
+                serial: Box::new(port),
+            },
+            response: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cancel_on_unplugged_port_returns_error() {
+        let busy = busy_terminal(UnpluggedPort {
+            writable: false,
+            pending: Vec::new(),
+        });
+        match busy.cancel() {
+            Err(FleaTerminalError::Io(e)) => assert_eq!(e.kind(), ErrorKind::BrokenPipe),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("cancel() succeeded on an unplugged port"),
+        }
+    }
+
+    #[test]
+    fn cancel_unplugged_after_prompt_returns_error() {
+        let busy = busy_terminal(UnpluggedPort {
+            writable: true,
+            pending: PROMPT.to_vec(),
+        });
+        match busy.cancel() {
+            Err(FleaTerminalError::SerialPort(_)) => {}
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("cancel() succeeded on an unplugged port"),
         }
     }
 }
