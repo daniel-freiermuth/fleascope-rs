@@ -245,8 +245,8 @@ impl BusyFleaTerminal {
                         PROMPT_LEN,
                     );
                 }
-                Ok(_) => continue, // No data available right now, but no error
-                Err(e) if e.kind() == ErrorKind::TimedOut => continue, // Timeout is expected in non-blocking reads
+                Ok(_) => {} // No data available right now, but no error
+                Err(e) if e.kind() == ErrorKind::TimedOut => {} // Timeout is expected in non-blocking reads
                 Err(e) if e.kind() == ErrorKind::BrokenPipe => {
                     return Err(FleaTerminalError::ConnectionLost)
                 }
@@ -361,5 +361,125 @@ mod tests {
         prompt_window_extend(&mut buf, b"data>", PROMPT.len());
         prompt_window_extend(&mut buf, b" ", PROMPT.len());
         assert!(buf.iter().copied().eq(PROMPT.iter().copied()));
+    }
+
+    /// Serial port whose device never answers: every read times out,
+    /// like the real port opened with a 70ms read timeout.
+    struct SilentPort;
+
+    impl Read for SilentPort {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_millis(10));
+            Err(std::io::Error::new(ErrorKind::TimedOut, "silent device"))
+        }
+    }
+
+    impl Write for SilentPort {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SerialPort for SilentPort {
+        fn name(&self) -> Option<String> {
+            None
+        }
+        fn baud_rate(&self) -> serialport::Result<u32> {
+            unimplemented!()
+        }
+        fn data_bits(&self) -> serialport::Result<serialport::DataBits> {
+            unimplemented!()
+        }
+        fn flow_control(&self) -> serialport::Result<serialport::FlowControl> {
+            unimplemented!()
+        }
+        fn parity(&self) -> serialport::Result<serialport::Parity> {
+            unimplemented!()
+        }
+        fn stop_bits(&self) -> serialport::Result<serialport::StopBits> {
+            unimplemented!()
+        }
+        fn timeout(&self) -> Duration {
+            Duration::from_millis(10)
+        }
+        fn set_baud_rate(&mut self, _: u32) -> serialport::Result<()> {
+            unimplemented!()
+        }
+        fn set_data_bits(&mut self, _: serialport::DataBits) -> serialport::Result<()> {
+            unimplemented!()
+        }
+        fn set_flow_control(&mut self, _: serialport::FlowControl) -> serialport::Result<()> {
+            unimplemented!()
+        }
+        fn set_parity(&mut self, _: serialport::Parity) -> serialport::Result<()> {
+            unimplemented!()
+        }
+        fn set_stop_bits(&mut self, _: serialport::StopBits) -> serialport::Result<()> {
+            unimplemented!()
+        }
+        fn set_timeout(&mut self, _: Duration) -> serialport::Result<()> {
+            unimplemented!()
+        }
+        fn write_request_to_send(&mut self, _: bool) -> serialport::Result<()> {
+            unimplemented!()
+        }
+        fn write_data_terminal_ready(&mut self, _: bool) -> serialport::Result<()> {
+            unimplemented!()
+        }
+        fn read_clear_to_send(&mut self) -> serialport::Result<bool> {
+            unimplemented!()
+        }
+        fn read_data_set_ready(&mut self) -> serialport::Result<bool> {
+            unimplemented!()
+        }
+        fn read_ring_indicator(&mut self) -> serialport::Result<bool> {
+            unimplemented!()
+        }
+        fn read_carrier_detect(&mut self) -> serialport::Result<bool> {
+            unimplemented!()
+        }
+        fn bytes_to_read(&self) -> serialport::Result<u32> {
+            Ok(0)
+        }
+        fn bytes_to_write(&self) -> serialport::Result<u32> {
+            Ok(0)
+        }
+        fn clear(&self, _: serialport::ClearBuffer) -> serialport::Result<()> {
+            Ok(())
+        }
+        fn try_clone(&self) -> serialport::Result<Box<dyn SerialPort>> {
+            unimplemented!()
+        }
+        fn set_break(&self) -> serialport::Result<()> {
+            unimplemented!()
+        }
+        fn clear_break(&self) -> serialport::Result<()> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn cancel_times_out_when_device_stays_silent() {
+        let busy = BusyFleaTerminal {
+            inner: StatelessFleaTerminal {
+                serial: Box::new(SilentPort),
+            },
+            response: Vec::new(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(busy.cancel().err());
+        });
+        // cancel() must give up after its 5s CANCEL_TIMEOUT; allow generous slack.
+        match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(Some(FleaTerminalError::Timeout { timeout })) => {
+                assert_eq!(timeout, Duration::from_secs(5));
+            }
+            Ok(other) => panic!("expected Timeout error, got {other:?}"),
+            Err(_) => panic!("cancel() did not return within 15s on a silent device"),
+        }
     }
 }
