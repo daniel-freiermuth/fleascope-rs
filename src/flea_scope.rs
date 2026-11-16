@@ -438,21 +438,11 @@ impl StreamingScope {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FleaProbe {
     multiplier: ProbeType,
     cal_zero: Option<f64>, // value for 0V
     cal_3v3: Option<f64>,  // value-diff 0V - 3.3V
-}
-
-impl Clone for FleaProbe {
-    fn clone(&self) -> Self {
-        Self {
-            multiplier: self.multiplier,
-            cal_zero: self.cal_zero,
-            cal_3v3: self.cal_3v3,
-        }
-    }
 }
 
 impl FleaProbe {
