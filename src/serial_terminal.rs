@@ -91,16 +91,7 @@ impl StatelessFleaTerminal {
                 response.extend_from_slice(&read_buffer[..bytes_read]);
 
                 // Check if we have the prompt at the end
-                if response.len() >= PROMPT.len() {
-                    let potential_prompt = &response[response.len() - PROMPT.len()..];
-                    if potential_prompt == PROMPT {
-                        Ok(true)
-                    } else {
-                        Ok(false)
-                    }
-                } else {
-                    Ok(false)
-                }
+                Ok(response.ends_with(PROMPT))
             }
             Ok(_) => {
                 // No data available right now, but no error
