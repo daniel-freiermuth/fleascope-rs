@@ -28,7 +28,7 @@
 //! let (mut scope, x1_probe, x10_probe) = IdleFleaScope::connect(None, None, true)?;
 //!
 //! // Set up signal generator
-//! scope.set_waveform(Waveform::Sine, 1000); // 1kHz sine wave
+//! scope.set_waveform(Waveform::Sine, 1000)?; // 1kHz sine wave
 //!
 //! // Read data using default auto trigger
 //! let trigger = DigitalTrigger::start_capturing_when().is_matching().into_trigger_fields();

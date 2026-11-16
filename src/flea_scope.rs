@@ -52,6 +52,9 @@ pub enum CaptureConfigError {
 
     #[error("Voltage out of range")]
     VoltageOutOfRange,
+
+    #[error("Serial terminal error: {0}")]
+    SerialTerminal(#[from] FleaTerminalError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -67,6 +70,9 @@ pub enum CalibrationError {
 
     #[error("Failure while processing calibration data")]
     CalibrationDataError(#[from] PolarsError),
+
+    #[error("Serial terminal error: {0}")]
+    SerialTerminal(#[from] FleaTerminalError),
 }
 
 pub struct ScopeReading {
@@ -217,39 +223,41 @@ impl IdleFleaScope {
         let mut x1 = FleaProbe::new(ProbeType::X1);
         let mut x10 = FleaProbe::new(ProbeType::X10);
 
-        let mut scope = Self::new(serial);
+        let mut scope = Self::new(serial)?;
         if read_calibrations {
-            x1.read_calibration_from_flash(&mut scope.serial);
-            x10.read_calibration_from_flash(&mut scope.serial);
+            x1.read_calibration_from_flash(&mut scope.serial)?;
+            x10.read_calibration_from_flash(&mut scope.serial)?;
         }
         Ok((scope, x1, x10))
     }
 
     /// Create a new `FleaScope` from an existing terminal connection
-    pub fn new(mut serial: IdleFleaTerminal) -> Self {
+    pub fn new(mut serial: IdleFleaTerminal) -> Result<Self, FleaTerminalError> {
         log::debug!("Turning off echo");
-        serial.exec_sync("echo off", None);
+        serial.exec_sync("echo off", None)?;
 
-        let ver = String::from_utf8(serial.exec_sync("ver", None)).expect("Failed to read version");
+        let ver =
+            String::from_utf8(serial.exec_sync("ver", None)?).expect("Failed to read version");
         log::debug!("FleaScope version: {ver}");
         // TODO: check if version is compatible
 
-        let hostname =
-            String::from_utf8(serial.exec_sync("hostname", None)).expect("Failed to read hostname");
+        let hostname = String::from_utf8(serial.exec_sync("hostname", None)?)
+            .expect("Failed to read hostname");
         log::debug!("FleaScope hostname: {hostname}");
         // TODO: check if hostname is correct
 
-        Self {
+        Ok(Self {
             serial,
             _ver: ver,
             hostname,
-        }
+        })
     }
 
     /// Set the waveform generator
-    pub fn set_waveform(&mut self, waveform: Waveform, hz: i32) {
+    pub fn set_waveform(&mut self, waveform: Waveform, hz: i32) -> Result<(), FleaTerminalError> {
         self.serial
-            .exec_sync(&format!("wave {} {}", waveform.as_str(), hz), None);
+            .exec_sync(&format!("wave {} {}", waveform.as_str(), hz), None)?;
+        Ok(())
     }
 
     /// Convert number1 to prescaler value
@@ -330,15 +338,22 @@ impl IdleFleaScope {
         profiling::scope!("read_async");
 
         match Self::prepare_read_command(time_frame, trigger_fields, delay) {
-            Ok((effective_msps, command)) => {
-                let data = self.serial.exec_async(&command);
-                Ok(ReadingFleaScope {
+            Ok((effective_msps, command)) => match self.serial.exec_async(&command) {
+                Ok(data) => Ok(ReadingFleaScope {
                     _ver: self._ver,
                     hostname: self.hostname,
                     serial: data,
                     effective_msps,
-                })
-            }
+                }),
+                Err((serial, e)) => Err((
+                    Self {
+                        serial,
+                        _ver: self._ver,
+                        hostname: self.hostname,
+                    },
+                    e.into(),
+                )),
+            },
             Err(e) => Err((self, e)),
         }
     }
@@ -354,25 +369,37 @@ impl IdleFleaScope {
         let (effective_msps, command) =
             Self::prepare_read_command(time_frame, trigger_fields, delay)?;
 
-        let data = self.serial.exec_sync(&command, None);
+        let data = self.serial.exec_sync(&command, None)?;
         Ok(ScopeReading {
             effective_msps,
             data,
         })
     }
 
-    pub fn stream(self) -> StreamingScope {
-        StreamingScope {
-            _ver: self._ver,
-            hostname: self.hostname,
-            serial: self.serial.exec_async("stream"),
+    pub fn stream(self) -> Result<StreamingScope, (Self, FleaTerminalError)> {
+        match self.serial.exec_async("stream") {
+            Ok(serial) => Ok(StreamingScope {
+                _ver: self._ver,
+                hostname: self.hostname,
+                serial,
+            }),
+            Err((serial, e)) => Err((
+                Self {
+                    serial,
+                    _ver: self._ver,
+                    hostname: self.hostname,
+                },
+                e,
+            )),
         }
     }
 
     /// Set the hostname
-    pub fn set_hostname(&mut self, hostname: &str) {
-        self.serial.exec_sync(&format!("hostname {hostname}"), None);
+    pub fn set_hostname(&mut self, hostname: &str) -> Result<(), FleaTerminalError> {
+        self.serial
+            .exec_sync(&format!("hostname {hostname}"), None)?;
         self.hostname = hostname.to_string();
+        Ok(())
     }
 
     pub fn teardown(mut self) {
@@ -435,7 +462,10 @@ impl FleaProbe {
         }
     }
 
-    pub fn read_calibration_from_flash(&mut self, serial: &mut IdleFleaTerminal) {
+    pub fn read_calibration_from_flash(
+        &mut self,
+        serial: &mut IdleFleaTerminal,
+    ) -> Result<(), FleaTerminalError> {
         let dim_result = String::from_utf8(serial.exec_sync(
             &format!(
                 "dim cal_zero_x{} as flash, cal_3v3_x{} as flash",
@@ -443,7 +473,7 @@ impl FleaProbe {
                 self.multiplier.to_multiplier()
             ),
             None,
-        ))
+        )?)
         .expect("Failed to read calibration from flash");
 
         let expected_response = format!(
@@ -458,7 +488,7 @@ impl FleaProbe {
         let cal_zero_raw: i32 = String::from_utf8(serial.exec_sync(
             &format!("print cal_zero_x{}", self.multiplier.to_multiplier()),
             None,
-        ))
+        )?)
         .expect("Failed to read cal_zero_x value")
         .trim()
         .parse()
@@ -466,7 +496,7 @@ impl FleaProbe {
         let cal_3v3_raw: i32 = String::from_utf8(serial.exec_sync(
             &format!("print cal_3v3_x{}", self.multiplier.to_multiplier()),
             None,
-        ))
+        )?)
         .expect("Failed to read cal_3v3_x value")
         .trim()
         .parse()
@@ -482,6 +512,7 @@ impl FleaProbe {
             self.cal_zero,
             self.cal_3v3
         );
+        Ok(())
     }
 
     /// Set calibration values manually
@@ -511,7 +542,7 @@ impl FleaProbe {
                 zero_value
             ),
             None,
-        );
+        )?;
         scope.serial.exec_sync(
             &format!(
                 "cal_3v3_x{} = {}",
@@ -519,7 +550,7 @@ impl FleaProbe {
                 v3v3_value
             ),
             None,
-        );
+        )?;
 
         Ok(())
     }
@@ -542,9 +573,13 @@ impl FleaProbe {
             .is_matching()
             .into_trigger_fields();
 
-        let bnc_values: Vec<f64> = scope
-            .read_sync(Duration::from_millis(20), trigger_fields, None)
-            .expect("This should not fail, as we are reading a stable value for calibration")
+        let bnc_values: Vec<f64> =
+            match scope.read_sync(Duration::from_millis(20), trigger_fields, None) {
+                Err(CaptureConfigError::SerialTerminal(e)) => return Err(e.into()),
+                reading => reading.expect(
+                    "This should not fail, as we are reading a stable value for calibration",
+                ),
+            }
             .parse_csv()?
             .select([col(RAW_COLUMN_NAME)])
             .collect()?

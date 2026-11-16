@@ -173,26 +173,30 @@ impl StatelessFleaTerminal {
 }
 
 impl IdleFleaTerminal {
-    pub fn exec_async(mut self, command: &str) -> BusyFleaTerminal {
+    pub fn exec_async(
+        mut self,
+        command: &str,
+    ) -> Result<BusyFleaTerminal, (Self, FleaTerminalError)> {
         profiling::scope!("IdleFleaTerminal::exec_async");
 
         let command_with_newline = format!("{command}\n");
-        self.inner
-            .serial
-            .write_all(command_with_newline.as_bytes())
-            .expect("Failed to write command to serial port");
+        if let Err(e) = self.inner.serial.write_all(command_with_newline.as_bytes()) {
+            return Err((self, e.into()));
+        }
 
-        BusyFleaTerminal {
+        Ok(BusyFleaTerminal {
             inner: self.inner,
             response: Vec::new(),
-        }
+        })
     }
-    pub fn exec_sync(&mut self, command: &str, timeout: Option<Duration>) -> Vec<u8> {
+    pub fn exec_sync(
+        &mut self,
+        command: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<u8>, FleaTerminalError> {
         profiling::scope!("IdleFleaTerminal::exec_sync");
 
-        self.inner
-            .exec_sync(command, timeout)
-            .expect("Failed to execute command")
+        self.inner.exec_sync(command, timeout)
     }
 }
 impl TryFrom<StatelessFleaTerminal> for IdleFleaTerminal {
@@ -634,6 +638,53 @@ mod tests {
             Err(FleaTerminalError::SerialPort(_)) => {}
             Err(e) => panic!("unexpected error: {e}"),
             Ok(_) => panic!("cancel() succeeded on an unplugged port"),
+        }
+    }
+
+    fn idle_terminal(port: UnpluggedPort) -> IdleFleaTerminal {
+        IdleFleaTerminal {
+            inner: StatelessFleaTerminal {
+                serial: Box::new(port),
+            },
+        }
+    }
+
+    #[test]
+    fn exec_async_on_unplugged_port_returns_error() {
+        let idle = idle_terminal(UnpluggedPort {
+            writable: false,
+            pending: Vec::new(),
+        });
+        match idle.exec_async("read 1") {
+            Err((_, FleaTerminalError::Io(e))) => assert_eq!(e.kind(), ErrorKind::BrokenPipe),
+            Err((_, e)) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("exec_async() succeeded on an unplugged port"),
+        }
+    }
+
+    #[test]
+    fn exec_sync_on_unplugged_port_returns_error() {
+        let mut idle = idle_terminal(UnpluggedPort {
+            writable: false,
+            pending: Vec::new(),
+        });
+        match idle.exec_sync("ver", None) {
+            Err(FleaTerminalError::Io(e)) => assert_eq!(e.kind(), ErrorKind::BrokenPipe),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("exec_sync() succeeded on an unplugged port"),
+        }
+    }
+
+    #[test]
+    fn exec_sync_unplugged_before_response_returns_connection_lost() {
+        let mut idle = idle_terminal(UnpluggedPort {
+            writable: true,
+            pending: Vec::new(),
+        });
+        match idle.exec_sync("ver", None) {
+            Err(FleaTerminalError::ConnectionLost) => {}
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("exec_sync() succeeded on an unplugged port"),
         }
     }
 }
