@@ -4,6 +4,8 @@ use std::io::{ErrorKind, Read, Write};
 use std::time::{Duration, Instant};
 
 const PROMPT: &[u8] = b"> ";
+/// How long `cancel()`, and a resync without a caller timeout, wait for the prompt.
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct StatelessFleaTerminal {
@@ -12,6 +14,9 @@ pub struct StatelessFleaTerminal {
 
 pub struct IdleFleaTerminal {
     inner: StatelessFleaTerminal,
+    /// A command failed and left the device in an unknown state; the next
+    /// command must resync it to a fresh prompt before writing anything.
+    needs_resync: bool,
 }
 
 pub struct ConnectionLostError;
@@ -170,17 +175,89 @@ impl StatelessFleaTerminal {
         self.serial.write_all(b"reset\n")?;
         Ok(())
     }
+
+    /// Idle-line resync. On StickOS, CTRL-C silently clears a partly typed line
+    /// and prints no prompt (`sources/terminal.c` accumulate()); `"> "` only
+    /// follows a command line. So CTRL-C is followed by an empty line, a no-op
+    /// command that answers with a prompt. If an earlier command is still
+    /// running, CTRL-C stops it as in `cancel()`.
+    fn resync(&mut self, timeout: Duration) -> Result<(), FleaTerminalError> {
+        self.serial.write_all(b"\x03\n")?;
+        self.await_prompt_and_flush(timeout)
+    }
+
+    /// Wait for the prompt and flush, leaving nothing left to read.
+    fn await_prompt_and_flush(&mut self, timeout: Duration) -> Result<(), FleaTerminalError> {
+        let cancel_start = Instant::now();
+        const PROMPT_LEN: usize = PROMPT.len();
+        const BUFFER_LEN: usize = 1024;
+        let mut prompt_buffer = VecDeque::with_capacity(PROMPT_LEN);
+        let mut read_buffer = [0u8; BUFFER_LEN];
+        loop {
+            match self.serial.read(&mut read_buffer) {
+                Ok(bytes_read) if bytes_read > 0 => {
+                    prompt_window_extend(
+                        &mut prompt_buffer,
+                        &read_buffer[..bytes_read],
+                        PROMPT_LEN,
+                    );
+                }
+                Ok(_) => {} // No data available right now, but no error
+                Err(e) if e.kind() == ErrorKind::TimedOut => {} // Timeout is expected in non-blocking reads
+                Err(e) if e.kind() == ErrorKind::BrokenPipe => {
+                    return Err(FleaTerminalError::ConnectionLost)
+                }
+                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                    return Err(FleaTerminalError::ConnectionLost)
+                }
+                Err(e) => panic!("Serial read error: {e}"),
+            }
+            // Check if we have the prompt at the end
+            if prompt_buffer.len() == PROMPT.len()
+                && prompt_buffer.iter().copied().eq(PROMPT.iter().copied())
+            {
+                break;
+            }
+            if cancel_start.elapsed() >= timeout {
+                return Err(FleaTerminalError::Timeout { timeout });
+            }
+        }
+        self.flush()
+    }
 }
 
 impl IdleFleaTerminal {
+    fn new(inner: StatelessFleaTerminal) -> Self {
+        Self {
+            inner,
+            needs_resync: false,
+        }
+    }
+
+    /// Resync to a fresh prompt if a failed command left that pending, so a
+    /// command is never sent onto a stale line or read as an earlier reply.
+    /// Waits for the prompt at most `timeout`, or `CANCEL_TIMEOUT` if `None`.
+    fn ensure_synced(&mut self, timeout: Option<Duration>) -> Result<(), FleaTerminalError> {
+        if self.needs_resync {
+            self.inner.resync(timeout.unwrap_or(CANCEL_TIMEOUT))?;
+            self.needs_resync = false;
+        }
+        Ok(())
+    }
+
     pub fn exec_async(
         mut self,
         command: &str,
     ) -> Result<BusyFleaTerminal, (Self, FleaTerminalError)> {
         profiling::scope!("IdleFleaTerminal::exec_async");
 
+        if let Err(e) = self.ensure_synced(None) {
+            return Err((self, e));
+        }
         let command_with_newline = format!("{command}\n");
         if let Err(e) = self.inner.serial.write_all(command_with_newline.as_bytes()) {
+            // The device may hold a partly written line; resync before the next command.
+            self.needs_resync = true;
             return Err((self, e.into()));
         }
 
@@ -196,7 +273,18 @@ impl IdleFleaTerminal {
     ) -> Result<Vec<u8>, FleaTerminalError> {
         profiling::scope!("IdleFleaTerminal::exec_sync");
 
-        self.inner.exec_sync(command, timeout)
+        // A pending resync is bounded by `timeout` on its own, and the command
+        // then gets the full `timeout` too. Sharing one deadline would leave
+        // the command less time than on a healthy terminal (the resync's flush
+        // alone takes a full port read timeout), so a short timeout would time
+        // out, re-arm the resync, and never recover.
+        self.ensure_synced(timeout)?;
+        self.inner.exec_sync(command, timeout).map_err(|e| {
+            // The device may hold a partly written line or still answer
+            // later; resync before the next command.
+            self.needs_resync = true;
+            e
+        })
     }
 }
 impl TryFrom<StatelessFleaTerminal> for IdleFleaTerminal {
@@ -222,7 +310,7 @@ impl TryFrom<StatelessFleaTerminal> for IdleFleaTerminal {
         if let Err(e) = value.flush() {
             return Err((value, e));
         }
-        Ok(Self { inner: value })
+        Ok(Self::new(value))
     }
 }
 
@@ -234,45 +322,8 @@ pub struct BusyFleaTerminal {
 impl BusyFleaTerminal {
     pub fn cancel(mut self) -> Result<IdleFleaTerminal, FleaTerminalError> {
         self.inner.send_ctrl_c()?;
-        const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
-        let cancel_start = Instant::now();
-        const PROMPT_LEN: usize = PROMPT.len();
-        const BUFFER_LEN: usize = 1024;
-        let mut prompt_buffer = VecDeque::with_capacity(PROMPT_LEN);
-        let mut read_buffer = [0u8; BUFFER_LEN];
-        loop {
-            match self.inner.serial.read(&mut read_buffer) {
-                Ok(bytes_read) if bytes_read > 0 => {
-                    prompt_window_extend(
-                        &mut prompt_buffer,
-                        &read_buffer[..bytes_read],
-                        PROMPT_LEN,
-                    );
-                }
-                Ok(_) => {} // No data available right now, but no error
-                Err(e) if e.kind() == ErrorKind::TimedOut => {} // Timeout is expected in non-blocking reads
-                Err(e) if e.kind() == ErrorKind::BrokenPipe => {
-                    return Err(FleaTerminalError::ConnectionLost)
-                }
-                Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-                    return Err(FleaTerminalError::ConnectionLost)
-                }
-                Err(e) => panic!("Serial read error: {e}"),
-            }
-            // Check if we have the prompt at the end
-            if prompt_buffer.len() == PROMPT.len()
-                && prompt_buffer.iter().copied().eq(PROMPT.iter().copied())
-            {
-                break;
-            }
-            if cancel_start.elapsed() >= CANCEL_TIMEOUT {
-                return Err(FleaTerminalError::Timeout {
-                    timeout: CANCEL_TIMEOUT,
-                });
-            }
-        }
-        self.inner.flush()?;
-        Ok(IdleFleaTerminal { inner: self.inner })
+        self.inner.await_prompt_and_flush(CANCEL_TIMEOUT)?;
+        Ok(IdleFleaTerminal::new(self.inner))
     }
 
     fn into_result(self) -> (Vec<u8>, IdleFleaTerminal) {
@@ -292,7 +343,7 @@ impl BusyFleaTerminal {
             .map_or(start, |i| i + 1);
         let trimmed = response_without_prompt[start..end].to_vec();
 
-        (trimmed, IdleFleaTerminal { inner: self.inner })
+        (trimmed, IdleFleaTerminal::new(self.inner))
     }
 
     pub fn try_get_result(
@@ -491,7 +542,9 @@ mod tests {
     /// tty is hung up, `poll` sees POLLHUP so read/write fail with
     /// `BrokenPipe`, and `tcflush` fails with EIO (`ErrorKind::Unknown`).
     /// `pending` bytes are delivered before reads start failing, and
-    /// `writable` keeps writes alive to model an unplug later in `cancel()`.
+    /// `writable` keeps writes alive to model an unplug that happens after
+    /// the last successful write. Once a read has seen the hangup, writes
+    /// fail too, as they do on a hung-up tty.
     struct UnpluggedPort {
         writable: bool,
         pending: Vec<u8>,
@@ -500,6 +553,7 @@ mod tests {
     impl Read for UnpluggedPort {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             if self.pending.is_empty() {
+                self.writable = false;
                 return Err(ErrorKind::BrokenPipe.into());
             }
             let n = self.pending.len().min(buf.len());
@@ -642,11 +696,9 @@ mod tests {
     }
 
     fn idle_terminal(port: UnpluggedPort) -> IdleFleaTerminal {
-        IdleFleaTerminal {
-            inner: StatelessFleaTerminal {
-                serial: Box::new(port),
-            },
-        }
+        IdleFleaTerminal::new(StatelessFleaTerminal {
+            serial: Box::new(port),
+        })
     }
 
     #[test]
@@ -686,5 +738,318 @@ mod tests {
             Err(e) => panic!("unexpected error: {e}"),
             Ok(_) => panic!("exec_sync() succeeded on an unplugged port"),
         }
+    }
+
+    /// Line-based fake FleaScope modelled on the StickOS terminal. Answers
+    /// `ver` and `hostname`, answers any other line (including an empty one)
+    /// with a bare prompt, and on CTRL-C silently drops the current line
+    /// without printing a prompt (`sources/terminal.c` accumulate(), echo
+    /// off; `"> "` only follows a command line). `ver_stall` reads time
+    /// out before the `ver` reply shows up (a slow device). `write_budget`
+    /// lets that many bytes through, then the next `failed_writes` writes time
+    /// out (a stalled port), so the device holds a partly written line.
+    /// `empty_read` is how long a read with nothing to deliver blocks (the
+    /// real port's 70ms timeout); `line_reads` hands out at most one line per
+    /// read, so a reply's output and its trailing prompt arrive separately.
+    struct FakeDevice {
+        line: Vec<u8>,
+        replies: std::cell::RefCell<VecDeque<u8>>,
+        stall: usize,
+        ver_stall: usize,
+        write_budget: Option<usize>,
+        failed_writes: usize,
+        empty_read: Duration,
+        line_reads: bool,
+    }
+
+    impl FakeDevice {
+        fn new(ver_stall: usize, write_budget: Option<usize>, failed_writes: usize) -> Self {
+            Self {
+                line: Vec::new(),
+                replies: std::cell::RefCell::new(VecDeque::new()),
+                stall: 0,
+                ver_stall,
+                write_budget,
+                failed_writes,
+                empty_read: Duration::from_millis(5),
+                line_reads: false,
+            }
+        }
+    }
+
+    impl Read for FakeDevice {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let mut replies = self.replies.borrow_mut();
+            if self.stall > 0 || replies.is_empty() {
+                self.stall = self.stall.saturating_sub(1);
+                std::thread::sleep(self.empty_read);
+                return Err(ErrorKind::TimedOut.into());
+            }
+            let mut n = replies.len().min(buf.len());
+            if self.line_reads {
+                if let Some(end) = replies.iter().position(|&b| b == b'\n') {
+                    n = n.min(end + 1);
+                }
+            }
+            for (dst, src) in buf.iter_mut().zip(replies.drain(..n)) {
+                *dst = src;
+            }
+            Ok(n)
+        }
+    }
+
+    impl Write for FakeDevice {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut n = buf.len();
+            if let Some(budget) = self.write_budget {
+                if budget == 0 {
+                    self.failed_writes = self.failed_writes.saturating_sub(1);
+                    if self.failed_writes == 0 {
+                        self.write_budget = None;
+                    }
+                    return Err(ErrorKind::TimedOut.into());
+                }
+                n = n.min(budget);
+                self.write_budget = Some(budget - n);
+            }
+            let mut replies = self.replies.borrow_mut();
+            for &b in &buf[..n] {
+                match b {
+                    0x03 => self.line.clear(),
+                    b'\n' => {
+                        let reply: &[u8] = match self.line.as_slice() {
+                            b"ver" => {
+                                self.stall = self.ver_stall;
+                                b"1.0\r\n> "
+                            }
+                            b"hostname" => b"smoke\r\n> ",
+                            _ => b"> ",
+                        };
+                        replies.extend(reply);
+                        self.line.clear();
+                    }
+                    _ => self.line.push(b),
+                }
+            }
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SerialPort for FakeDevice {
+        fn clear(&self, _: serialport::ClearBuffer) -> serialport::Result<()> {
+            self.replies.borrow_mut().clear();
+            Ok(())
+        }
+        fn bytes_to_read(&self) -> serialport::Result<u32> {
+            Ok(self.replies.borrow().len() as u32)
+        }
+        fn name(&self) -> Option<String> {
+            unreachable!()
+        }
+        fn baud_rate(&self) -> serialport::Result<u32> {
+            unreachable!()
+        }
+        fn data_bits(&self) -> serialport::Result<serialport::DataBits> {
+            unreachable!()
+        }
+        fn flow_control(&self) -> serialport::Result<serialport::FlowControl> {
+            unreachable!()
+        }
+        fn parity(&self) -> serialport::Result<serialport::Parity> {
+            unreachable!()
+        }
+        fn stop_bits(&self) -> serialport::Result<serialport::StopBits> {
+            unreachable!()
+        }
+        fn timeout(&self) -> Duration {
+            unreachable!()
+        }
+        fn set_baud_rate(&mut self, _: u32) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn set_data_bits(&mut self, _: serialport::DataBits) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn set_flow_control(&mut self, _: serialport::FlowControl) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn set_parity(&mut self, _: serialport::Parity) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn set_stop_bits(&mut self, _: serialport::StopBits) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn set_timeout(&mut self, _: Duration) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn write_request_to_send(&mut self, _: bool) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn write_data_terminal_ready(&mut self, _: bool) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn read_clear_to_send(&mut self) -> serialport::Result<bool> {
+            unreachable!()
+        }
+        fn read_data_set_ready(&mut self) -> serialport::Result<bool> {
+            unreachable!()
+        }
+        fn read_ring_indicator(&mut self) -> serialport::Result<bool> {
+            unreachable!()
+        }
+        fn read_carrier_detect(&mut self) -> serialport::Result<bool> {
+            unreachable!()
+        }
+        fn bytes_to_write(&self) -> serialport::Result<u32> {
+            unreachable!()
+        }
+        fn try_clone(&self) -> serialport::Result<Box<dyn SerialPort>> {
+            unreachable!()
+        }
+        fn set_break(&self) -> serialport::Result<()> {
+            unreachable!()
+        }
+        fn clear_break(&self) -> serialport::Result<()> {
+            unreachable!()
+        }
+    }
+
+    fn idle_fake_device(device: FakeDevice) -> IdleFleaTerminal {
+        IdleFleaTerminal::new(StatelessFleaTerminal {
+            serial: Box::new(device),
+        })
+    }
+
+    #[test]
+    fn exec_sync_timeout_does_not_leak_late_reply_into_next_command() {
+        let mut idle = idle_fake_device(FakeDevice::new(10, None, 0));
+        match idle.exec_sync("ver", Some(Duration::from_millis(20))) {
+            Err(FleaTerminalError::Timeout { timeout }) => {
+                assert_eq!(timeout, Duration::from_millis(20));
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(r) => panic!("ver answered before its stall: {r:?}"),
+        }
+        let hostname = idle
+            .exec_sync("hostname", Some(Duration::from_secs(1)))
+            .expect("hostname after a timed-out command");
+        assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    #[test]
+    fn exec_async_failed_write_does_not_corrupt_next_command() {
+        let idle = idle_fake_device(FakeDevice::new(0, Some(3), 1));
+        let mut idle = match idle.exec_async("read 1") {
+            Err((idle, FleaTerminalError::Io(e))) => {
+                assert_eq!(e.kind(), ErrorKind::TimedOut);
+                idle
+            }
+            Err((_, e)) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("exec_async() succeeded despite a stalled write"),
+        };
+        let hostname = idle
+            .exec_sync("hostname", Some(Duration::from_secs(1)))
+            .expect("hostname after a failed exec_async");
+        assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    #[test]
+    fn exec_async_failed_resync_does_not_corrupt_next_command() {
+        // The stall also swallows the next call's resync, so "rea" stays on the line.
+        let idle = idle_fake_device(FakeDevice::new(0, Some(3), 2));
+        let mut idle = match idle.exec_async("read 1") {
+            Err((idle, FleaTerminalError::Io(e))) => {
+                assert_eq!(e.kind(), ErrorKind::TimedOut);
+                idle
+            }
+            Err((_, e)) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("exec_async() succeeded despite a stalled write"),
+        };
+        match idle.exec_sync("hostname", Some(Duration::from_secs(1))) {
+            Err(FleaTerminalError::Io(e)) => assert_eq!(e.kind(), ErrorKind::TimedOut),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(r) => panic!("command ran despite a failed resync: {r:?}"),
+        }
+        let hostname = idle
+            .exec_sync("hostname", Some(Duration::from_secs(1)))
+            .expect("hostname once the resync gets through");
+        assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    #[test]
+    fn exec_sync_failed_resync_does_not_leak_late_reply_into_next_command() {
+        // "ver\n" gets through, the late reply times the caller out, and the
+        // next call's resync is swallowed by a stalled write.
+        let mut idle = idle_fake_device(FakeDevice::new(10, Some(4), 1));
+        match idle.exec_sync("ver", Some(Duration::from_millis(20))) {
+            Err(FleaTerminalError::Timeout { timeout }) => {
+                assert_eq!(timeout, Duration::from_millis(20));
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(r) => panic!("ver answered before its stall: {r:?}"),
+        }
+        match idle.exec_sync("hostname", Some(Duration::from_secs(1))) {
+            Err(FleaTerminalError::Io(e)) => assert_eq!(e.kind(), ErrorKind::TimedOut),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(r) => panic!("command ran despite a failed resync: {r:?}"),
+        }
+        let hostname = idle
+            .exec_sync("hostname", Some(Duration::from_secs(1)))
+            .expect("hostname once the resync gets through");
+        assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    #[test]
+    fn exec_sync_timeout_stays_bounded_by_callers_timeout() {
+        // A device that accepts writes but never answers: every call must
+        // give up after the caller's timeout, including the pending resync.
+        let mut idle = IdleFleaTerminal::new(StatelessFleaTerminal {
+            serial: Box::new(SilentPort),
+        });
+        let timeout = Duration::from_millis(100);
+        for call in 0..2 {
+            let start = Instant::now();
+            match idle.exec_sync("ver", Some(timeout)) {
+                Err(FleaTerminalError::Timeout { timeout: t }) => assert_eq!(t, timeout),
+                Err(e) => panic!("call {call}: unexpected error: {e}"),
+                Ok(r) => panic!("call {call}: silent device answered: {r:?}"),
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(1),
+                "call {call} took {:?} with a {timeout:?} timeout",
+                start.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn exec_sync_recovers_after_timeout_with_short_caller_timeout() {
+        // Port-like timing: a read with nothing to deliver blocks 70ms, and the
+        // reply's output and prompt come in separate reads. The resync's flush
+        // alone takes one 70ms read, longer than the caller's 50ms timeout.
+        let mut device = FakeDevice::new(2, None, 0);
+        device.empty_read = Duration::from_millis(70);
+        device.line_reads = true;
+        let mut idle = idle_fake_device(device);
+        let timeout = Duration::from_millis(50);
+        match idle.exec_sync("ver", Some(timeout)) {
+            Err(FleaTerminalError::Timeout { timeout: t }) => assert_eq!(t, timeout),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(r) => panic!("ver answered before its stall: {r:?}"),
+        }
+        // The device answers again; within a few calls the terminal must be
+        // usable, and stay usable, under the same short timeout.
+        let recovered = (0..5).any(|_| idle.exec_sync("hostname", Some(timeout)).is_ok());
+        assert!(
+            recovered,
+            "terminal never recovered under a {timeout:?} timeout"
+        );
+        let hostname = idle
+            .exec_sync("hostname", Some(timeout))
+            .expect("hostname right after recovery");
+        assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
     }
 }
