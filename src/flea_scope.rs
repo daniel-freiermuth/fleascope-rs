@@ -175,25 +175,22 @@ impl ReadingFleaScope {
     ) -> Result<Result<(IdleFleaScope, ScopeReading), Self>, ConnectionLostError> {
         profiling::scope!("try_get_result");
 
-        match self.serial.try_get_result() {
-            Ok(r) => match r {
-                Ok((data, idle_terminal)) => Ok(Ok((
-                    IdleFleaScope {
-                        serial: idle_terminal,
-                        _ver: self._ver,
-                        hostname: self.hostname,
-                    },
-                    ScopeReading {
-                        effective_msps: self.effective_msps,
-                        data,
-                    },
-                ))),
-                Err(busy_terminal) => {
-                    self.serial = busy_terminal;
-                    Ok(Err(self))
-                }
-            },
-            Err(e) => Err(e),
+        match self.serial.try_get_result()? {
+            Ok((data, idle_terminal)) => Ok(Ok((
+                IdleFleaScope {
+                    serial: idle_terminal,
+                    _ver: self._ver,
+                    hostname: self.hostname,
+                },
+                ScopeReading {
+                    effective_msps: self.effective_msps,
+                    data,
+                },
+            ))),
+            Err(busy_terminal) => {
+                self.serial = busy_terminal;
+                Ok(Err(self))
+            }
         }
     }
     pub fn cancel(self) -> Result<IdleFleaScope, FleaTerminalError> {
