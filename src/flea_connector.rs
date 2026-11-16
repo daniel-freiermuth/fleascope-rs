@@ -40,7 +40,7 @@ impl FleaConnector {
         let terminal = if let Some(port) = port {
             log::debug!("Connecting to FleaScope on port {port}");
             Self::validate_port(name, port)?;
-            StatelessFleaTerminal::new(port)?.try_into().unwrap()
+            Self::open_port(port)?
         } else {
             let device_name = name.unwrap_or("FleaScope");
             Self::get_working_serial(device_name)?
@@ -60,6 +60,13 @@ impl FleaConnector {
         }
 
         Ok(())
+    }
+
+    /// Open `port` and bring it to an idle, prompt-enabled terminal
+    fn open_port(port: &str) -> Result<IdleFleaTerminal, FleaConnectorError> {
+        StatelessFleaTerminal::new(port)?
+            .try_into()
+            .map_err(|(_serial, e): (_, FleaTerminalError)| e.into())
     }
 
     /// Validate that a serial port info represents a `FleaScope` device
@@ -192,6 +199,24 @@ mod tests {
                 panic!("Unexpected error: {:?}", e);
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_port_returns_error_when_device_never_answers() {
+        // The master end stays open but never answers, like a stalled device.
+        let (_master, slave) = serialport::TTYPort::pair().unwrap();
+        let slave_path = serialport::SerialPort::name(&slave).unwrap();
+        drop(slave);
+
+        let result = FleaConnector::open_port(&slave_path);
+
+        assert!(matches!(
+            result,
+            Err(FleaConnectorError::SerialTerminal(
+                FleaTerminalError::Timeout { .. }
+            ))
+        ));
     }
 
     #[test]
