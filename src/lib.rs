@@ -132,7 +132,7 @@ pub mod trigger_config;
 // Re-export the main types for convenience
 pub use trigger_config::{
     AnalogTrigger, AnalogTriggerBehavior, AnalogTriggerBuilder, BitState, BitTriggerBuilder,
-    DigitalTrigger, DigitalTriggerBehavior, Trigger,
+    DigitalTrigger, DigitalTriggerBehavior,
 };
 
 pub use serial_terminal::{FleaTerminalError, IdleFleaTerminal, StatelessFleaTerminal};
