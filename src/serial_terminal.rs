@@ -61,7 +61,7 @@ impl StatelessFleaTerminal {
     fn flush(&mut self) -> Result<(), FleaTerminalError> {
         log::debug!("Flushing serial port buffers once");
         self.serial.clear(serialport::ClearBuffer::All)?;
-        while self.serial.bytes_to_read().unwrap() > 0 {
+        while self.serial.bytes_to_read()? > 0 {
             log::debug!("Flushing serial port buffers twice");
             self.serial.clear(serialport::ClearBuffer::Input)?;
         }
@@ -806,6 +806,8 @@ mod tests {
     /// `empty_read` is how long a read with nothing to deliver blocks (the
     /// real port's 70ms timeout); `line_reads` hands out at most one line per
     /// read, so a reply's output and its trailing prompt arrive separately.
+    /// `bytes_to_read_fails` makes `bytes_to_read()` fail while `clear()`
+    /// still succeeds.
     struct FakeDevice {
         line: Vec<u8>,
         replies: std::cell::RefCell<VecDeque<u8>>,
@@ -815,6 +817,7 @@ mod tests {
         failed_writes: usize,
         empty_read: Duration,
         line_reads: bool,
+        bytes_to_read_fails: bool,
     }
 
     impl FakeDevice {
@@ -828,6 +831,7 @@ mod tests {
                 failed_writes,
                 empty_read: Duration::from_millis(5),
                 line_reads: false,
+                bytes_to_read_fails: false,
             }
         }
     }
@@ -899,6 +903,12 @@ mod tests {
             Ok(())
         }
         fn bytes_to_read(&self) -> serialport::Result<u32> {
+            if self.bytes_to_read_fails {
+                return Err(serialport::Error::new(
+                    serialport::ErrorKind::Unknown,
+                    "I/O error",
+                ));
+            }
             Ok(self.replies.borrow().len() as u32)
         }
         fn name(&self) -> Option<String> {
@@ -1106,5 +1116,19 @@ mod tests {
             .exec_sync("hostname", Some(timeout))
             .expect("hostname right after recovery");
         assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    #[test]
+    fn flush_bytes_to_read_error_returns_error() {
+        let mut device = FakeDevice::new(0, None, 0);
+        device.bytes_to_read_fails = true;
+        let stateless = StatelessFleaTerminal {
+            serial: Box::new(device),
+        };
+        match IdleFleaTerminal::try_from(stateless) {
+            Err((_, FleaTerminalError::SerialPort(_))) => {}
+            Err((_, e)) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("connecting succeeded despite a bytes_to_read() error"),
+        }
     }
 }
