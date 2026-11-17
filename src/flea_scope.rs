@@ -2,7 +2,7 @@ use crate::flea_connector::{FleaConnector, FleaConnectorError};
 use crate::serial_terminal::{
     BusyFleaTerminal, ConnectionLostError, FleaTerminalError, IdleFleaTerminal, TerminalStatus,
 };
-use crate::trigger_config::{DigitalTrigger, StringifiedTriggerConfig, TriggerConfig};
+use crate::trigger_config::{DigitalTrigger, StringifiedTriggerConfig};
 use std::io::Read;
 use std::time::Duration;
 
