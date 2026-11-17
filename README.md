@@ -24,7 +24,7 @@ let trigger_config = DigitalTrigger::start_capturing_when()
                         .into_trigger_fields()?;
 let reading = scope.read_sync(Duration::from_millis(10), trigger_config, None)?;
 let uncalibrated_frame : Polars::LazyFrame = reading.parse_csv();
-let calibrated_frame = x1.apply_calibration(uncalibrated_frame)
+let calibrated_frame = x1.apply_calibration(uncalibrated_frame)?;
 println!("Captured {} samples", calibrated_frame.collect().height());
 ```
 
