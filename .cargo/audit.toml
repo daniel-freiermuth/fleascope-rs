@@ -1,19 +1,12 @@
 [advisories]
-# Advisories that cannot be fixed by a lockfile update because polars 0.49
-# pins the affected crate to a vulnerable semver range. Neither code path is
-# used by fleascope-rs. Remove each entry once the polars upgrade lifts the
+# Advisories that cannot be fixed by a lockfile update because polars 0.55
+# pins the affected crate to a vulnerable semver range. The code path is not
+# used by fleascope-rs. Remove each entry once a polars upgrade lifts the
 # dependency past the patched version (`cargo audit` then passes without it).
 ignore = [
-    # quick-xml 0.38.4 via object_store 0.12 (polars-io "cloud", on by
+    # quick-xml 0.39.4 via object_store 0.13 (polars-io "cloud", on by
     # default). Patched in quick-xml >= 0.41; polars 0.55.2 still uses 0.39.
     # Only parses cloud-storage XML responses; fleascope-rs does no cloud I/O.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
-    # skiplist 0.5.1 via polars-compute 0.49 (rolling/window.rs SortedBuf,
-    # sorted rolling windows). Patched in skiplist >= 1.3.0; polars 0.55.2
-    # no longer depends on it. fleascope-rs calls no rolling API, and polars
-    # stores only Copy numbers (no Drop) ordered by a total order (tot_cmp),
-    # so neither trigger (panicking Drop, inconsistent comparator) applies.
-    "RUSTSEC-2026-0300",
-    "RUSTSEC-2026-0409",
 ]

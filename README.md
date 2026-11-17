@@ -83,6 +83,8 @@ All methods return `polars::DataFrame` with:
 
 Use `IdleFleaScope::extract_bits()` to convert bitmap to individual bit columns.
 
+Polars types (`LazyFrame`, `DataFrame`, `PolarsError`, `Expr`) are part of this crate's public API, and every polars 0.x minor release is semver-breaking. This crate depends on **polars 0.55**; a crate that passes these frames into its own polars code must depend on the same polars minor version.
+
 ## Related Projects
 
 - Live monitor GUI https://github.com/daniel-freiermuth/fleascope-monitor-rs
