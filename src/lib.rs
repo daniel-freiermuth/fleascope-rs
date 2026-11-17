@@ -103,10 +103,10 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Connect to any available FleaScope device
-//! let terminal = FleaConnector::connect(None, None, true)?;
+//! let terminal = FleaConnector::connect(None, None)?;
 //!
 //! // Or connect to a specific port
-//! let terminal = FleaConnector::connect(None, Some("/dev/ttyUSB0"), true)?;
+//! let terminal = FleaConnector::connect(None, Some("/dev/ttyUSB0"))?;
 //!
 //! // List available devices (iterator - memory efficient)
 //! let devices = FleaConnector::get_available_devices(None)?;
