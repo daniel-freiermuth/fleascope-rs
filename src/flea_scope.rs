@@ -57,6 +57,9 @@ pub enum CaptureConfigError {
 
     #[error("Serial terminal error: {0}")]
     SerialTerminal(#[from] FleaTerminalError),
+
+    #[error("Calibration error: {0}")]
+    Calibration(#[from] CalibrationError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -548,13 +551,13 @@ impl FleaProbe {
         Ok(())
     }
 
-    pub fn apply_calibration(&self, df: LazyFrame) -> LazyFrame {
+    pub fn apply_calibration(&self, df: LazyFrame) -> Result<LazyFrame, CalibrationError> {
         profiling::scope!("apply_calibration");
 
-        df.with_column(
-            self.raw_to_voltage(col(RAW_COLUMN_NAME))
+        Ok(df.with_column(
+            self.raw_to_voltage(col(RAW_COLUMN_NAME))?
                 .alias(CALIBRATED_COLUMN_NAME),
-        )
+        ))
     }
 
     /// Read a stable value for calibration purposes
@@ -593,37 +596,38 @@ impl FleaProbe {
     }
 
     /// Convert raw ADC value to voltage
-    pub fn raw_to_voltage(&self, raw_value: Expr) -> Expr {
-        let cal_zero = self.cal_zero.expect("Calibration for 0V is not set");
-        let cal_3v3 = self.cal_3v3.expect("Calibration for 3.3V is not set");
+    pub fn raw_to_voltage(&self, raw_value: Expr) -> Result<Expr, CalibrationError> {
+        let cal_zero = self
+            .cal_zero
+            .ok_or(CalibrationError::NoCalibrationPresent)?;
+        let cal_3v3 = self.cal_3v3.ok_or(CalibrationError::NoCalibrationPresent)?;
 
-        (raw_value - cal_zero.into()) / cal_3v3.into() * 3.3.into()
+        Ok((raw_value - cal_zero.into()) / cal_3v3.into() * 3.3.into())
     }
 
     /// Convert voltage to raw ADC value
-    pub fn voltage_to_raw(&self, voltage: f64) -> f64 {
-        let cal_zero = self.cal_zero.expect("Calibration for 0V is not set");
-        let cal_3v3 = self.cal_3v3.expect("Calibration for 3.3V is not set");
+    pub fn voltage_to_raw(&self, voltage: f64) -> Result<f64, CalibrationError> {
+        let cal_zero = self
+            .cal_zero
+            .ok_or(CalibrationError::NoCalibrationPresent)?;
+        let cal_3v3 = self.cal_3v3.ok_or(CalibrationError::NoCalibrationPresent)?;
 
-        (voltage / 3.3).mul_add(cal_3v3, cal_zero)
+        Ok((voltage / 3.3).mul_add(cal_3v3, cal_zero))
     }
 
     /// Calibrate for 0V
     pub fn calibrate_0(&mut self, scope: &mut IdleFleaScope) -> Result<f64, CalibrationError> {
         // Try to preserve existing 3.3V calibration if available
-        let raw_value_3v3 = if let (Some(_), Some(_)) = (self.cal_zero, self.cal_3v3) {
-            Some(self.voltage_to_raw(3.3))
-        } else {
-            None
-        };
+        let raw_value_3v3 = self.voltage_to_raw(3.3).ok();
 
-        self.cal_zero = Some(self.read_stable_value_for_calibration(scope)?);
+        let cal_zero = self.read_stable_value_for_calibration(scope)?;
+        self.cal_zero = Some(cal_zero);
 
         if let Some(raw_3v3) = raw_value_3v3 {
-            self.cal_3v3 = Some(raw_3v3 - self.cal_zero.unwrap());
+            self.cal_3v3 = Some(raw_3v3 - cal_zero);
         }
 
-        Ok(self.cal_zero.unwrap())
+        Ok(cal_zero)
     }
 
     /// Calibrate for 3.3V
@@ -631,9 +635,10 @@ impl FleaProbe {
         let cal_zero = self.cal_zero.ok_or(CalibrationError::NoZeroCalibrarion)?;
 
         let raw_3v3 = self.read_stable_value_for_calibration(scope)?;
-        self.cal_3v3 = Some(raw_3v3 - cal_zero);
+        let cal_3v3 = raw_3v3 - cal_zero;
+        self.cal_3v3 = Some(cal_3v3);
 
-        Ok(self.cal_3v3.unwrap())
+        Ok(cal_3v3)
     }
 
     /// Get calibration values
@@ -645,6 +650,7 @@ impl FleaProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AnalogTrigger;
 
     #[test]
     fn test_waveform_as_str() {
@@ -800,6 +806,7 @@ mod tests {
 
         let df = probe
             .apply_calibration(reading().parse_csv().unwrap())
+            .unwrap()
             .collect()
             .unwrap();
 
@@ -811,5 +818,36 @@ mod tests {
             f64_column(&df, RAW_COLUMN_NAME),
             [2048.0, 2100.0, 1996.0, 2500.0]
         );
+    }
+
+    #[test]
+    fn test_uncalibrated_probe_conversions_return_error() {
+        let probe = FleaProbe::new(ProbeType::X1);
+        assert!(matches!(
+            probe.voltage_to_raw(1.0),
+            Err(CalibrationError::NoCalibrationPresent)
+        ));
+        assert!(matches!(
+            probe.raw_to_voltage(col(RAW_COLUMN_NAME)),
+            Err(CalibrationError::NoCalibrationPresent)
+        ));
+        assert!(matches!(
+            AnalogTrigger::start_capturing_when(1.0)
+                .rising_edge()
+                .into_trigger(&probe),
+            Err(CaptureConfigError::Calibration(
+                CalibrationError::NoCalibrationPresent
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_calibrated_probe_converts_voltage() {
+        let mut probe = FleaProbe::new(ProbeType::X1);
+        probe.set_calibration(2048.0, 1000.0);
+        assert!(matches!(
+            probe.voltage_to_raw(3.3),
+            Ok(raw) if (raw - 3048.0).abs() < 1e-9
+        ));
     }
 }

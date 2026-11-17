@@ -217,7 +217,7 @@ impl AnalogTriggerBuilder {
     }
 
     pub fn into_trigger(self, flea_probe: &FleaProbe) -> Result<AnalogTrigger, CaptureConfigError> {
-        let raw_level = (flea_probe.voltage_to_raw(self.volts) / 4.0 + 0.5) as i16;
+        let raw_level = (flea_probe.voltage_to_raw(self.volts)? / 4.0 + 0.5) as i16;
 
         if !(-1023..=1023).contains(&raw_level) {
             return Err(CaptureConfigError::VoltageOutOfRange);
