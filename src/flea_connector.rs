@@ -203,6 +203,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "macOS ptys reject the IOSSIOSPEED ioctl serialport uses to set the baud rate on open"
+    )]
     fn open_port_returns_error_when_device_never_answers() {
         // The master end stays open but never answers, like a stalled device.
         let (_master, slave) = serialport::TTYPort::pair().unwrap();
