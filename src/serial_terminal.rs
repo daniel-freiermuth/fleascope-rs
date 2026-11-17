@@ -75,7 +75,7 @@ impl StatelessFleaTerminal {
         Ok(())
     }
 
-    fn read_chunk(&mut self, response: &mut Vec<u8>) -> Result<bool, ConnectionLostError> {
+    fn read_chunk(&mut self, response: &mut Vec<u8>) -> Result<bool, FleaTerminalError> {
         let mut read_buffer = [0u8; 1024]; // Read in chunks
         profiling::scope!("read_chunk");
         match self.serial.read(&mut read_buffer) {
@@ -104,12 +104,11 @@ impl StatelessFleaTerminal {
                 // Timeout is expected in non-blocking reads
                 Ok(false)
             }
-            Err(e) if e.kind() == ErrorKind::BrokenPipe => Err(ConnectionLostError),
-            Err(e) if e.kind() == ErrorKind::UnexpectedEof => Err(ConnectionLostError),
-            Err(e) => {
-                tracing::info!("Serial read error (kind: {:?})...{e}", e.kind());
-                panic!("Serial read error: {e}");
+            Err(e) if e.kind() == ErrorKind::BrokenPipe => Err(FleaTerminalError::ConnectionLost),
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                Err(FleaTerminalError::ConnectionLost)
             }
+            Err(e) => Err(FleaTerminalError::Io(e)),
         }
     }
 
@@ -135,10 +134,8 @@ impl StatelessFleaTerminal {
 
         loop {
             profiling::scope!("serial_read_chunk");
-            match self.read_chunk(&mut response) {
-                Ok(true) => break,
-                Ok(false) => {}
-                Err(ConnectionLostError) => return Err(FleaTerminalError::ConnectionLost),
+            if self.read_chunk(&mut response)? {
+                break;
             }
             if let Some(t) = timeout {
                 if now.elapsed() >= t {
@@ -210,7 +207,7 @@ impl StatelessFleaTerminal {
                 Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
                     return Err(FleaTerminalError::ConnectionLost)
                 }
-                Err(e) => panic!("Serial read error: {e}"),
+                Err(e) => return Err(FleaTerminalError::Io(e)),
             }
             // Check if we have the prompt at the end
             if prompt_buffer.len() == PROMPT.len()
@@ -366,7 +363,11 @@ impl BusyFleaTerminal {
         match self.inner.read_chunk(&mut self.response) {
             Ok(true) => Ok(Ok(self.into_result())),
             Ok(false) => Ok(Err(self)),
-            Err(ConnectionLostError) => Err(ConnectionLostError),
+            Err(FleaTerminalError::ConnectionLost) => Err(ConnectionLostError),
+            Err(e) => {
+                tracing::warn!("Serial read error, treating the connection as lost: {e}");
+                Err(ConnectionLostError)
+            }
         }
     }
 }
@@ -544,17 +545,20 @@ mod tests {
     /// `pending` bytes are delivered before reads start failing, and
     /// `writable` keeps writes alive to model an unplug that happens after
     /// the last successful write. Once a read has seen the hangup, writes
-    /// fail too, as they do on a hung-up tty.
+    /// fail too, as they do on a hung-up tty. `read_error` is the kind the
+    /// failing reads report: `BrokenPipe` for the hangup, anything else for
+    /// a read error the terminal does not classify.
     struct UnpluggedPort {
         writable: bool,
         pending: Vec<u8>,
+        read_error: ErrorKind,
     }
 
     impl Read for UnpluggedPort {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             if self.pending.is_empty() {
                 self.writable = false;
-                return Err(ErrorKind::BrokenPipe.into());
+                return Err(self.read_error.into());
             }
             let n = self.pending.len().min(buf.len());
             buf[..n].copy_from_slice(&self.pending[..n]);
@@ -674,6 +678,7 @@ mod tests {
         let busy = busy_terminal(UnpluggedPort {
             writable: false,
             pending: Vec::new(),
+            read_error: ErrorKind::BrokenPipe,
         });
         match busy.cancel() {
             Err(FleaTerminalError::Io(e)) => assert_eq!(e.kind(), ErrorKind::BrokenPipe),
@@ -687,6 +692,7 @@ mod tests {
         let busy = busy_terminal(UnpluggedPort {
             writable: true,
             pending: PROMPT.to_vec(),
+            read_error: ErrorKind::BrokenPipe,
         });
         match busy.cancel() {
             Err(FleaTerminalError::SerialPort(_)) => {}
@@ -706,6 +712,7 @@ mod tests {
         let idle = idle_terminal(UnpluggedPort {
             writable: false,
             pending: Vec::new(),
+            read_error: ErrorKind::BrokenPipe,
         });
         match idle.exec_async("read 1") {
             Err((_, FleaTerminalError::Io(e))) => assert_eq!(e.kind(), ErrorKind::BrokenPipe),
@@ -719,6 +726,7 @@ mod tests {
         let mut idle = idle_terminal(UnpluggedPort {
             writable: false,
             pending: Vec::new(),
+            read_error: ErrorKind::BrokenPipe,
         });
         match idle.exec_sync("ver", None) {
             Err(FleaTerminalError::Io(e)) => assert_eq!(e.kind(), ErrorKind::BrokenPipe),
@@ -732,12 +740,51 @@ mod tests {
         let mut idle = idle_terminal(UnpluggedPort {
             writable: true,
             pending: Vec::new(),
+            read_error: ErrorKind::BrokenPipe,
         });
         match idle.exec_sync("ver", None) {
             Err(FleaTerminalError::ConnectionLost) => {}
             Err(e) => panic!("unexpected error: {e}"),
             Ok(_) => panic!("exec_sync() succeeded on an unplugged port"),
         }
+    }
+
+    #[test]
+    fn unclassified_read_error_in_cancel_returns_io_error() {
+        let busy = busy_terminal(UnpluggedPort {
+            writable: true,
+            pending: Vec::new(),
+            read_error: ErrorKind::Other,
+        });
+        match busy.cancel() {
+            Err(FleaTerminalError::Io(e)) => assert_eq!(e.kind(), ErrorKind::Other),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("cancel() succeeded despite a failing read"),
+        }
+    }
+
+    #[test]
+    fn unclassified_read_error_in_exec_sync_returns_io_error() {
+        let mut idle = idle_terminal(UnpluggedPort {
+            writable: true,
+            pending: Vec::new(),
+            read_error: ErrorKind::Other,
+        });
+        match idle.exec_sync("ver", None) {
+            Err(FleaTerminalError::Io(e)) => assert_eq!(e.kind(), ErrorKind::Other),
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("exec_sync() succeeded despite a failing read"),
+        }
+    }
+
+    #[test]
+    fn unclassified_read_error_in_try_get_result_reports_connection_lost() {
+        let busy = busy_terminal(UnpluggedPort {
+            writable: true,
+            pending: Vec::new(),
+            read_error: ErrorKind::Other,
+        });
+        assert!(matches!(busy.try_get_result(), Err(ConnectionLostError)));
     }
 
     /// Line-based fake FleaScope modelled on the StickOS terminal. Answers
