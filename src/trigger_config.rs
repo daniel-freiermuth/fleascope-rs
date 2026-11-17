@@ -257,23 +257,3 @@ impl TriggerConfig for AnalogTrigger {
         }
     }
 }
-
-/// A unified trigger type that can represent both analog and digital triggers.
-/// This allows treating all triggers uniformly in the API.
-#[derive(Debug, Clone)]
-pub enum Trigger {
-    Analog(AnalogTrigger),
-    Digital(DigitalTrigger),
-}
-
-impl From<AnalogTrigger> for Trigger {
-    fn from(trigger: AnalogTrigger) -> Self {
-        Self::Analog(trigger)
-    }
-}
-
-impl From<DigitalTrigger> for Trigger {
-    fn from(trigger: DigitalTrigger) -> Self {
-        Self::Digital(trigger)
-    }
-}
