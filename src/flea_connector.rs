@@ -23,9 +23,6 @@ pub enum FleaConnectorError {
         "No FleaScope device {name} found. Please connect a FleaScope or specify the port manually"
     )]
     DeviceNotFound { name: String },
-
-    #[error("Device validation failed")]
-    DeviceValidationFailed,
 }
 
 pub struct FleaConnector;
