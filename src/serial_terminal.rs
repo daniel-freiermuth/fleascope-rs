@@ -34,6 +34,12 @@ pub enum FleaTerminalError {
 
     #[error("Connection lost while waiting for response")]
     ConnectionLost,
+
+    #[error("Unexpected response to `{command}`: {response:?}")]
+    UnexpectedResponse {
+        command: Box<str>,
+        response: Box<str>,
+    },
 }
 
 impl StatelessFleaTerminal {

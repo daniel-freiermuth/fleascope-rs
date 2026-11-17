@@ -233,13 +233,11 @@ impl IdleFleaScope {
         log::debug!("Turning off echo");
         serial.exec_sync("echo off", None)?;
 
-        let ver =
-            String::from_utf8(serial.exec_sync("ver", None)?).expect("Failed to read version");
+        let ver = String::from_utf8_lossy(&serial.exec_sync("ver", None)?).into_owned();
         log::debug!("FleaScope version: {ver}");
         // TODO: check if version is compatible
 
-        let hostname = String::from_utf8(serial.exec_sync("hostname", None)?)
-            .expect("Failed to read hostname");
+        let hostname = String::from_utf8_lossy(&serial.exec_sync("hostname", None)?).into_owned();
         log::debug!("FleaScope hostname: {hostname}");
         // TODO: check if hostname is correct
 
@@ -453,7 +451,7 @@ impl FleaProbe {
         &mut self,
         serial: &mut IdleFleaTerminal,
     ) -> Result<(), FleaTerminalError> {
-        let dim_result = String::from_utf8(serial.exec_sync(
+        let dim_result = String::from_utf8_lossy(&serial.exec_sync(
             &format!(
                 "dim cal_zero_x{} as flash, cal_3v3_x{} as flash",
                 self.multiplier.to_multiplier(),
@@ -461,7 +459,7 @@ impl FleaProbe {
             ),
             None,
         )?)
-        .expect("Failed to read calibration from flash");
+        .into_owned();
 
         let expected_response = format!(
             "var 'cal_zero_x{}' already declared at this scope\r\nvar 'cal_3v3_x{}' already declared at this scope",
@@ -473,22 +471,14 @@ impl FleaProbe {
             log::debug!("Variables for calibration already declared. Reading values.");
         }
 
-        let cal_zero_raw: i32 = String::from_utf8(serial.exec_sync(
-            &format!("print cal_zero_x{}", self.multiplier.to_multiplier()),
-            None,
-        )?)
-        .expect("Failed to read cal_zero_x value")
-        .trim()
-        .parse()
-        .expect("Failed to parse cal_zero_x value");
-        let cal_3v3_raw: i32 = String::from_utf8(serial.exec_sync(
-            &format!("print cal_3v3_x{}", self.multiplier.to_multiplier()),
-            None,
-        )?)
-        .expect("Failed to read cal_3v3_x value")
-        .trim()
-        .parse()
-        .expect("Failed to parse cal_3v3_x value");
+        let cal_zero_command = format!("print cal_zero_x{}", self.multiplier.to_multiplier());
+        let cal_zero_raw = parse_calibration_reply(
+            &cal_zero_command,
+            &serial.exec_sync(&cal_zero_command, None)?,
+        )?;
+        let cal_3v3_command = format!("print cal_3v3_x{}", self.multiplier.to_multiplier());
+        let cal_3v3_raw =
+            parse_calibration_reply(&cal_3v3_command, &serial.exec_sync(&cal_3v3_command, None)?)?;
 
         self.cal_zero = Some(f64::from(cal_zero_raw - 1000) + 2048.0);
         self.cal_3v3 =
@@ -637,6 +627,19 @@ impl FleaProbe {
     pub fn calibration(&self) -> (Option<f64>, Option<f64>) {
         (self.cal_zero, self.cal_3v3)
     }
+}
+
+/// Parse the integer the device prints for a calibration variable. Anything
+/// else (a `StickOS` error message, line noise, non-UTF-8 bytes) is reported as
+/// an unexpected response rather than trusted.
+fn parse_calibration_reply(command: &str, reply: &[u8]) -> Result<i32, FleaTerminalError> {
+    std::str::from_utf8(reply)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .ok_or_else(|| FleaTerminalError::UnexpectedResponse {
+            command: command.into(),
+            response: String::from_utf8_lossy(reply).into(),
+        })
 }
 
 #[cfg(test)]
@@ -841,5 +844,32 @@ mod tests {
             probe.voltage_to_raw(3.3),
             Ok(raw) if (raw - 3048.0).abs() < 1e-9
         ));
+    }
+
+    #[test]
+    fn calibration_reply_parses_printed_integer() {
+        assert_eq!(
+            parse_calibration_reply("print cal_zero_x1", b"1023").unwrap(),
+            1023
+        );
+        assert_eq!(
+            parse_calibration_reply("print cal_3v3_x1", b" -7\r").unwrap(),
+            -7
+        );
+    }
+
+    #[test]
+    fn calibration_reply_rejects_non_numeric_and_non_utf8() {
+        for reply in [&b"error - undefined variable"[..], b"", b"10\xff23"] {
+            let result = parse_calibration_reply("print cal_zero_x1", reply);
+            assert!(
+                matches!(
+                    &result,
+                    Err(FleaTerminalError::UnexpectedResponse { command, response })
+                        if &**command == "print cal_zero_x1" && **response == *String::from_utf8_lossy(reply)
+                ),
+                "{reply:?} gave {result:?}"
+            );
+        }
     }
 }
