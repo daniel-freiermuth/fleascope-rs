@@ -1,5 +1,7 @@
 use crate::flea_connector::{FleaConnector, FleaConnectorError};
-use crate::serial_terminal::{BusyFleaTerminal, ConnectionLostError, FleaTerminalError, IdleFleaTerminal};
+use crate::serial_terminal::{
+    BusyFleaTerminal, ConnectionLostError, FleaTerminalError, IdleFleaTerminal,
+};
 use crate::trigger_config::{DigitalTrigger, StringifiedTriggerConfig, TriggerConfig};
 use polars::prelude::*;
 use std::io::Read;

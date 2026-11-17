@@ -123,7 +123,6 @@
 //! # Ok(())
 //! # }
 //! ```
-//! ```
 
 pub mod flea_connector;
 pub mod flea_scope;
