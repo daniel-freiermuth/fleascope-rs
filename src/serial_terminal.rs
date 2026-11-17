@@ -401,7 +401,9 @@ mod tests {
     #[test]
     fn prompt_window_slides_through_junk() {
         let mut buf = VecDeque::new();
-        for &b in b"XY> " { prompt_window_extend(&mut buf, std::slice::from_ref(&b), PROMPT.len()); }
+        for &b in b"XY> " {
+            prompt_window_extend(&mut buf, std::slice::from_ref(&b), PROMPT.len());
+        }
         assert_eq!(buf.len(), PROMPT.len());
         assert!(buf.iter().copied().eq(PROMPT.iter().copied()));
     }
