@@ -137,10 +137,10 @@ impl StatelessFleaTerminal {
             if self.read_chunk(&mut response)? {
                 break;
             }
-            if let Some(t) = timeout {
-                if now.elapsed() >= t {
-                    return Err(FleaTerminalError::Timeout { timeout: t });
-                }
+            if let Some(t) = timeout
+                && now.elapsed() >= t
+            {
+                return Err(FleaTerminalError::Timeout { timeout: t });
             }
         }
 
@@ -835,10 +835,10 @@ mod tests {
                 return Err(ErrorKind::TimedOut.into());
             }
             let mut n = replies.len().min(buf.len());
-            if self.line_reads {
-                if let Some(end) = replies.iter().position(|&b| b == b'\n') {
-                    n = n.min(end + 1);
-                }
+            if self.line_reads
+                && let Some(end) = replies.iter().position(|&b| b == b'\n')
+            {
+                n = n.min(end + 1);
             }
             for (dst, src) in buf.iter_mut().zip(replies.drain(..n)) {
                 *dst = src;

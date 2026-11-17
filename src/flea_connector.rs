@@ -92,14 +92,10 @@ impl FleaConnector {
         }
 
         // Check if name matches (if specified)
-        if let Some(expected_name) = name {
-            if let Some(product_name) = &usb_info.product {
-                if product_name != expected_name {
-                    return false;
-                }
-            } else {
-                return false;
-            }
+        if let Some(expected_name) = name
+            && usb_info.product.as_deref() != Some(expected_name)
+        {
+            return false;
         }
 
         true
@@ -114,16 +110,14 @@ impl FleaConnector {
 
         Ok(ports.into_iter().filter_map(move |port_info| {
             // Only consider USB devices
-            if let serialport::SerialPortType::UsbPort(usb_info) = &port_info.port_type {
-                // Must have a product name and pass validation
-                if let Some(device_name) = usb_info.product.clone() {
-                    if Self::validate_device(name_owned.as_deref(), &port_info) {
-                        return Some(FleaDevice {
-                            name: device_name,
-                            port: port_info.port_name,
-                        });
-                    }
-                }
+            if let serialport::SerialPortType::UsbPort(usb_info) = &port_info.port_type
+                && let Some(device_name) = usb_info.product.clone()
+                && Self::validate_device(name_owned.as_deref(), &port_info)
+            {
+                return Some(FleaDevice {
+                    name: device_name,
+                    port: port_info.port_name,
+                });
             }
             None
         }))

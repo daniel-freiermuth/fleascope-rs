@@ -133,20 +133,14 @@ impl ScopeReading {
         let mut bit_columns: Vec<Vec<bool>> = vec![Vec::new(); 10];
 
         for bitmap_opt in bitmap_strings.iter() {
-            if let Some(bitmap_str) = bitmap_opt {
-                let bitmap_str = bitmap_str.trim_start_matches("0x");
-                if let Ok(bitmap_val) = u32::from_str_radix(bitmap_str, 16) {
-                    for (bit, column) in bit_columns.iter_mut().enumerate().take(10) {
-                        column.push((bitmap_val >> bit) & 1 == 1);
-                    }
-                } else {
-                    // Default to false for unparseable values
-                    for column in bit_columns.iter_mut().take(10) {
-                        column.push(false);
-                    }
+            if let Some(bitmap_str) = bitmap_opt
+                && let Ok(bitmap_val) = u32::from_str_radix(bitmap_str.trim_start_matches("0x"), 16)
+            {
+                for (bit, column) in bit_columns.iter_mut().enumerate().take(10) {
+                    column.push((bitmap_val >> bit) & 1 == 1);
                 }
             } else {
-                // Default to false for null values
+                // Default to false for null or unparseable values
                 for column in bit_columns.iter_mut().take(10) {
                     column.push(false);
                 }
