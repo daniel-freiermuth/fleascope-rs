@@ -35,7 +35,6 @@ impl FleaConnector {
     pub fn connect(
         name: Option<&str>,
         port: Option<&str>,
-        _read_calibrations: bool,
     ) -> Result<IdleFleaTerminal, FleaConnectorError> {
         let terminal = if let Some(port) = port {
             log::debug!("Connecting to FleaScope on port {port}");

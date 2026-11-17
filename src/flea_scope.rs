@@ -222,7 +222,7 @@ impl IdleFleaScope {
         port: Option<&str>,
         read_calibrations: bool,
     ) -> Result<(Self, FleaProbe, FleaProbe), FleaConnectorError> {
-        let serial = FleaConnector::connect(name, port, true)?;
+        let serial = FleaConnector::connect(name, port)?;
         let mut x1 = FleaProbe::new(ProbeType::X1);
         let mut x10 = FleaProbe::new(ProbeType::X10);
 
