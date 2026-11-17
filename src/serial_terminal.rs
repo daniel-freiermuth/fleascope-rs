@@ -202,10 +202,10 @@ impl StatelessFleaTerminal {
                 Ok(_) => {} // No data available right now, but no error
                 Err(e) if e.kind() == ErrorKind::TimedOut => {} // Timeout is expected in non-blocking reads
                 Err(e) if e.kind() == ErrorKind::BrokenPipe => {
-                    return Err(FleaTerminalError::ConnectionLost)
+                    return Err(FleaTerminalError::ConnectionLost);
                 }
                 Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-                    return Err(FleaTerminalError::ConnectionLost)
+                    return Err(FleaTerminalError::ConnectionLost);
                 }
                 Err(e) => return Err(FleaTerminalError::Io(e)),
             }
