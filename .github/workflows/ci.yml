@@ -71,3 +71,16 @@ jobs:
       - run: cargo doc --locked --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # Checks Cargo.lock against the RustSec advisory database (fetched
+      # fresh on every run, so the weekly schedule also catches advisories
+      # published after a change landed). Vulnerabilities fail the job;
+      # unmaintained/yanked notices are reported as warnings only.
+      - run: cargo audit
