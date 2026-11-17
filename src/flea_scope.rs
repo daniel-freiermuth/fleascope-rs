@@ -93,13 +93,14 @@ impl ScopeReading {
 
         let df = CsvReadOptions::default()
             .with_has_header(false)
+            // The firmware prints `%d,%x`: bitmaps are unprefixed hex, so an
+            // all-digit capture would otherwise infer as an integer column.
+            .with_dtype_overwrite(Some(Arc::new(vec![DataType::Float64, DataType::String])))
             .into_reader_with_file_handle(std::io::Cursor::new(&self.data))
             .finish()?
             .lazy()
             .select([
-                col("column_1")
-                    .alias(RAW_COLUMN_NAME)
-                    .cast(DataType::Float64),
+                col("column_1").alias(RAW_COLUMN_NAME),
                 col("column_2").alias(BITMAP_COLUMN_NAME),
             ])
             .with_row_index("row_index", Some(0))
@@ -128,7 +129,7 @@ impl ScopeReading {
         // Parse hex strings and extract bits
         let mut bit_columns: Vec<Vec<bool>> = vec![Vec::new(); 10];
 
-        for bitmap_opt in bitmap_strings {
+        for bitmap_opt in bitmap_strings.iter() {
             if let Some(bitmap_str) = bitmap_opt {
                 let bitmap_str = bitmap_str.trim_start_matches("0x");
                 if let Ok(bitmap_val) = u32::from_str_radix(bitmap_str, 16) {
@@ -667,5 +668,158 @@ mod tests {
     fn test_number1_to_prescaler() {
         assert!(IdleFleaScope::number1_to_prescaler(100).is_ok());
         assert!(IdleFleaScope::number1_to_prescaler(0).is_err());
+    }
+
+    /// Four samples as the firmware prints them: `printf("%d,%x\n", adc, bits)`
+    /// (fleascope-fw cpustick/scope-command.c), i.e. unprefixed hex bitmaps,
+    /// with the CRLF line endings of the serial terminal.
+    const CAPTURE: &[u8] = b"2048,0\r\n2100,3ff\r\n1996,205\r\n2500,0\r\n";
+
+    fn reading_of(data: &[u8]) -> ScopeReading {
+        ScopeReading {
+            effective_msps: 2.0,
+            data: data.to_vec(),
+        }
+    }
+
+    fn reading() -> ScopeReading {
+        reading_of(CAPTURE)
+    }
+
+    fn bitmap_strings(df: &DataFrame) -> Vec<Option<&str>> {
+        df.column(BITMAP_COLUMN_NAME)
+            .unwrap()
+            .str()
+            .unwrap()
+            .iter()
+            .collect()
+    }
+
+    fn f64_column(df: &DataFrame, name: &str) -> Vec<f64> {
+        df.column(name)
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect()
+    }
+
+    fn bool_column(df: &DataFrame, name: &str) -> Vec<bool> {
+        df.column(name)
+            .unwrap()
+            .bool()
+            .unwrap()
+            .iter()
+            .collect::<Option<Vec<bool>>>()
+            .unwrap()
+    }
+
+    fn assert_close(got: &[f64], want: &[f64]) {
+        assert_eq!(got.len(), want.len(), "{got:?} != {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-12, "{got:?} != {want:?}");
+        }
+    }
+
+    #[test]
+    fn parse_csv_yields_time_raw_and_bitmap_columns() {
+        let df = reading().parse_csv().unwrap().collect().unwrap();
+
+        let names: Vec<&str> = df.get_column_names().iter().map(|n| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [TIME_COLUMN_NAME, RAW_COLUMN_NAME, BITMAP_COLUMN_NAME]
+        );
+        // 2 MSPS → 0.5 µs per sample.
+        assert_close(
+            &f64_column(&df, TIME_COLUMN_NAME),
+            &[0.0, 0.5e-6, 1.0e-6, 1.5e-6],
+        );
+        assert_eq!(
+            f64_column(&df, RAW_COLUMN_NAME),
+            [2048.0, 2100.0, 1996.0, 2500.0]
+        );
+        assert_eq!(
+            bitmap_strings(&df),
+            [Some("0"), Some("3ff"), Some("205"), Some("0")]
+        );
+    }
+
+    #[test]
+    fn parse_csv_keeps_all_digit_bitmaps_as_hex() {
+        // No hex letters anywhere, so dtype inference alone would pick an integer.
+        let mut df = reading_of(b"2048,0\r\n2049,10\r\n2047,205\r\n")
+            .parse_csv()
+            .unwrap()
+            .collect()
+            .unwrap();
+        assert_eq!(bitmap_strings(&df), [Some("0"), Some("10"), Some("205")]);
+
+        ScopeReading::extract_bits(&mut df).unwrap();
+        // 0x10 = bit 4; 0x205 = bits 0, 2 and 9.
+        assert_eq!(bool_column(&df, "bit_0"), [false, false, true]);
+        assert_eq!(bool_column(&df, "bit_2"), [false, false, true]);
+        assert_eq!(bool_column(&df, "bit_4"), [false, true, false]);
+        assert_eq!(bool_column(&df, "bit_9"), [false, false, true]);
+    }
+
+    #[test]
+    fn parse_csv_accepts_hex_letters_after_digit_only_rows() {
+        // Hex letters first appear after polars' default 100-row inference window.
+        let mut data = b"2048,0\r\n".repeat(150);
+        data.extend_from_slice(b"2048,3ff\r\n");
+        let mut df = reading_of(&data).parse_csv().unwrap().collect().unwrap();
+        assert_eq!(df.height(), 151);
+        assert_eq!(bitmap_strings(&df)[150], Some("3ff"));
+
+        ScopeReading::extract_bits(&mut df).unwrap();
+        let bit_9 = bool_column(&df, "bit_9");
+        assert!(bit_9[150]);
+        assert!(bit_9[..150].iter().all(|&b| !b));
+    }
+
+    #[test]
+    fn extract_bits_splits_hex_bitmap_into_bit_columns() {
+        let mut df = reading().parse_csv().unwrap().collect().unwrap();
+        ScopeReading::extract_bits(&mut df).unwrap();
+
+        // 0x205 = bits 0, 2 and 9.
+        let expected: [[bool; 4]; 10] = [
+            [false, true, true, false],
+            [false, true, false, false],
+            [false, true, true, false],
+            [false, true, false, false],
+            [false, true, false, false],
+            [false, true, false, false],
+            [false, true, false, false],
+            [false, true, false, false],
+            [false, true, false, false],
+            [false, true, true, false],
+        ];
+        for (bit, want) in expected.iter().enumerate() {
+            assert_eq!(bool_column(&df, &format!("bit_{bit}")), want, "bit_{bit}");
+        }
+        assert!(df.column("bit_10").is_err());
+    }
+
+    #[test]
+    fn apply_calibration_maps_raw_to_volts() {
+        let mut probe = FleaProbe::new(ProbeType::X1);
+        // 2048 → 0 V, 2048 + 1000 → 3.3 V.
+        probe.set_calibration(2048.0, 1000.0);
+
+        let df = probe
+            .apply_calibration(reading().parse_csv().unwrap())
+            .collect()
+            .unwrap();
+
+        assert_close(
+            &f64_column(&df, CALIBRATED_COLUMN_NAME),
+            &[0.0, 0.1716, -0.1716, 1.4916],
+        );
+        assert_eq!(
+            f64_column(&df, RAW_COLUMN_NAME),
+            [2048.0, 2100.0, 1996.0, 2500.0]
+        );
     }
 }
