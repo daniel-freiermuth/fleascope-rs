@@ -1,0 +1,33 @@
+name: Release
+
+# Dry run only: checks that a pushed version tag matches Cargo.toml and that
+# the crate packages and builds as crates.io would see it. It does not
+# publish; `cargo publish` is still run by hand.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tag matches Cargo.toml version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
+            exit 1
+          fi
+      - run: cargo publish --dry-run --locked
