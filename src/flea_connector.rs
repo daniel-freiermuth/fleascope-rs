@@ -108,7 +108,7 @@ impl FleaConnector {
     /// Get all available `FleaScope` devices as an iterator
     pub fn get_available_devices(
         name: Option<&str>,
-    ) -> Result<impl Iterator<Item = FleaDevice>, FleaConnectorError> {
+    ) -> Result<impl Iterator<Item = FleaDevice> + use<>, FleaConnectorError> {
         let ports = serialport::available_ports()?;
         let name_owned = name.map(std::string::ToString::to_string);
 

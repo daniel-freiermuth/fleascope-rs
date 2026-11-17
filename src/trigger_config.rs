@@ -1,4 +1,4 @@
-use crate::{flea_scope::CaptureConfigError, FleaProbe};
+use crate::{FleaProbe, flea_scope::CaptureConfigError};
 
 pub trait TriggerConfig {
     fn into_trigger_fields(self) -> StringifiedTriggerConfig;

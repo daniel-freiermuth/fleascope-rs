@@ -471,7 +471,8 @@ impl FleaProbe {
 
         let expected_response = format!(
             "var 'cal_zero_x{}' already declared at this scope\r\nvar 'cal_3v3_x{}' already declared at this scope",
-            self.multiplier.to_multiplier(), self.multiplier.to_multiplier()
+            self.multiplier.to_multiplier(),
+            self.multiplier.to_multiplier()
         );
 
         if dim_result == expected_response {
