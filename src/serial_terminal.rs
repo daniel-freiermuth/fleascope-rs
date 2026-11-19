@@ -6,6 +6,37 @@ use std::time::{Duration, Instant};
 const PROMPT: &[u8] = b"> ";
 /// How long `cancel()`, and a resync without a caller timeout, wait for the prompt.
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long [`IdleFleaTerminal::flash_upgrade`] waits for the device to ask for HEX records.
+const UPGRADE_START_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long [`IdleFleaTerminal::flash_upgrade`] waits for the device to finish after the last record.
+const UPGRADE_FINISH_TIMEOUT: Duration = Duration::from_secs(120);
+const UPGRADE_READY: &[u8] = b"paste HEX upgrade file now";
+const UPGRADE_DONE: &[u8] = b"paste done!";
+const UPGRADE_FAILED: &[u8] = b"upgrade failed";
+
+/// Progress information passed to the `on_progress` callback during [`IdleFleaTerminal::flash_upgrade`].
+#[derive(Debug, Clone, Copy)]
+pub struct FlashProgress {
+    /// Number of records sent so far.
+    pub sent: usize,
+    /// Total number of records to send.
+    pub total: usize,
+}
+
+/// Errors that can occur during a firmware flash upgrade.
+#[derive(Debug, thiserror::Error)]
+pub enum FlashUpgradeError {
+    #[error("Serial terminal error: {0}")]
+    Terminal(#[from] FleaTerminalError),
+
+    #[error(
+        "Device did not start upgrade within timeout; no 'paste HEX upgrade file now' received"
+    )]
+    UpgradeStartTimeout,
+
+    #[error("Upgrade failed — device output: {0}")]
+    UpgradeFailed(String),
+}
 
 #[derive(Debug)]
 pub struct StatelessFleaTerminal {
@@ -218,6 +249,41 @@ impl StatelessFleaTerminal {
         }
         self.flush()
     }
+
+    /// Write raw bytes directly to the serial port.
+    fn write_raw(&mut self, data: &[u8]) -> Result<(), FleaTerminalError> {
+        self.serial.write_all(data)?;
+        Ok(())
+    }
+
+    /// Read until one of `patterns` occurs anywhere in the received bytes,
+    /// also when it straddles two reads.
+    ///
+    /// Returns the received bytes and the index of the matched pattern, or
+    /// `FleaTerminalError::Timeout` if none matched within `timeout`.
+    fn read_until_pattern(
+        &mut self,
+        patterns: &[&[u8]],
+        timeout: Duration,
+    ) -> Result<(Vec<u8>, usize), FleaTerminalError> {
+        let mut response = Vec::new();
+        let start = Instant::now();
+        loop {
+            let searched = response.len();
+            // Prompt detection is irrelevant here; read_chunk only extends `response`.
+            self.read_chunk(&mut response)?;
+            if response.len() > searched
+                && let Some(idx) = patterns
+                    .iter()
+                    .position(|p| contains_from(&response, searched, p))
+            {
+                return Ok((response, idx));
+            }
+            if start.elapsed() >= timeout {
+                return Err(FleaTerminalError::Timeout { timeout });
+            }
+        }
+    }
 }
 
 impl IdleFleaTerminal {
@@ -279,6 +345,69 @@ impl IdleFleaTerminal {
             self.needs_resync = true;
             e
         })
+    }
+
+    /// Flash new firmware to the device by streaming Intel HEX records.
+    ///
+    /// Steps:
+    /// 1. Sends the `upgrade` command.
+    /// 2. Waits for the device to prompt for HEX input.
+    /// 3. Streams every record line to the device.
+    /// 4. Waits for `"paste done!"` (success) or `"upgrade failed"` (failure).
+    ///
+    /// `on_progress` is called after each record line is sent with current progress.
+    /// After a successful flash the device resets itself; the connection will be dead.
+    pub fn flash_upgrade(
+        &mut self,
+        hex_lines: &[&str],
+        mut on_progress: impl FnMut(FlashProgress),
+    ) -> Result<(), FlashUpgradeError> {
+        let total = hex_lines.len();
+
+        self.ensure_synced(None)?;
+        // From here on the device leaves the prompt-driven command loop: it
+        // answers `upgrade` without a prompt and resets after a successful
+        // flash. Whatever happens, the next command has to resync first.
+        self.needs_resync = true;
+
+        // 1. Send the upgrade command directly (not via exec_sync — the device will NOT
+        //    return a `> ` prompt during the upgrade; it just waits for HEX records).
+        self.inner.write_raw(b"upgrade\n")?;
+
+        // 2. Wait for the device to announce it is ready for HEX input.
+        match self
+            .inner
+            .read_until_pattern(&[UPGRADE_READY], UPGRADE_START_TIMEOUT)
+        {
+            Ok(_) => {}
+            Err(FleaTerminalError::Timeout { .. }) => {
+                return Err(FlashUpgradeError::UpgradeStartTimeout);
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        // 3. Stream every HEX record.
+        let mut record = String::new();
+        for (i, line) in hex_lines.iter().enumerate() {
+            record.clear();
+            record.push_str(line);
+            record.push('\n');
+            self.inner.write_raw(record.as_bytes())?;
+            on_progress(FlashProgress { sent: i + 1, total });
+        }
+
+        // 4. Wait for completion. The device resets after "paste done!" so we may
+        //    never see the closing `> ` prompt — that is expected.
+        let (output, matched) = self
+            .inner
+            .read_until_pattern(&[UPGRADE_DONE, UPGRADE_FAILED], UPGRADE_FINISH_TIMEOUT)?;
+        if matched == 1 {
+            return Err(FlashUpgradeError::UpgradeFailed(
+                String::from_utf8_lossy(&output).into_owned(),
+            ));
+        }
+
+        Ok(())
     }
 }
 impl TryFrom<StatelessFleaTerminal> for IdleFleaTerminal {
@@ -382,6 +511,16 @@ fn prompt_window_extend(buf: &mut VecDeque<u8>, new: &[u8], window_len: usize) {
     while buf.len() > window_len {
         buf.pop_front();
     }
+}
+
+/// Whether `needle` occurs in `haystack` in a match ending past `searched`,
+/// i.e. one not already visible in `haystack[..searched]`.
+fn contains_from(haystack: &[u8], searched: usize, needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let start = searched.saturating_sub(needle.len() - 1);
+    haystack[start..].windows(needle.len()).any(|w| w == needle)
 }
 
 #[cfg(test)]
@@ -798,7 +937,10 @@ mod tests {
     /// real port's 70ms timeout); `line_reads` hands out at most one line per
     /// read, so a reply's output and its trailing prompt arrive separately.
     /// `bytes_to_read_fails` makes `bytes_to_read()` fail while `clear()`
-    /// still succeeds.
+    /// still succeeds. `upgrade` asks for HEX records without a prompt; HEX
+    /// records get no reply, except the end-of-file record (`paste done!`)
+    /// and `:BAD` (`upgrade failed`). `max_read` caps the bytes per read, so
+    /// a message can straddle reads.
     struct FakeDevice {
         line: Vec<u8>,
         replies: std::cell::RefCell<VecDeque<u8>>,
@@ -809,6 +951,7 @@ mod tests {
         empty_read: Duration,
         line_reads: bool,
         bytes_to_read_fails: bool,
+        max_read: usize,
     }
 
     impl FakeDevice {
@@ -823,6 +966,7 @@ mod tests {
                 empty_read: Duration::from_millis(5),
                 line_reads: false,
                 bytes_to_read_fails: false,
+                max_read: usize::MAX,
             }
         }
     }
@@ -835,7 +979,7 @@ mod tests {
                 std::thread::sleep(self.empty_read);
                 return Err(ErrorKind::TimedOut.into());
             }
-            let mut n = replies.len().min(buf.len());
+            let mut n = replies.len().min(buf.len()).min(self.max_read);
             if self.line_reads
                 && let Some(end) = replies.iter().position(|&b| b == b'\n')
             {
@@ -873,6 +1017,10 @@ mod tests {
                                 b"1.0\r\n> "
                             }
                             b"hostname" => b"smoke\r\n> ",
+                            b"upgrade" => b"paste HEX upgrade file now\r\n",
+                            b":00000001FF" => b"paste done!\r\n",
+                            b":BAD" => b"upgrade failed\r\n> ",
+                            l if l.starts_with(b":") => b"",
                             _ => b"> ",
                         };
                         replies.extend(reply);
@@ -1121,5 +1269,42 @@ mod tests {
             Err((_, e)) => panic!("unexpected error: {e}"),
             Ok(_) => panic!("connecting succeeded despite a bytes_to_read() error"),
         }
+    }
+
+    #[test]
+    fn flash_upgrade_after_failed_write_resyncs_and_detects_split_done() {
+        // A stalled write leaves "rea" on the device's line; without a resync
+        // `upgrade` would arrive as "reaupgrade" and never start. Reads of 4
+        // bytes split "paste HEX upgrade file now" and "paste done!".
+        let mut device = FakeDevice::new(0, Some(3), 1);
+        device.max_read = 4;
+        let idle = idle_fake_device(device);
+        let mut idle = match idle.exec_async("read 1") {
+            Err((idle, FleaTerminalError::Io(_))) => idle,
+            Err((_, e)) => panic!("unexpected error: {e}"),
+            Ok(_) => panic!("exec_async() succeeded despite a stalled write"),
+        };
+        let records = [":10000000DEADBEEF", ":10001000CAFEBABE", ":00000001FF"];
+        let mut progress = Vec::new();
+        idle.flash_upgrade(&records, |p| progress.push((p.sent, p.total)))
+            .expect("flash_upgrade");
+        assert_eq!(progress, [(1, 3), (2, 3), (3, 3)]);
+    }
+
+    #[test]
+    fn flash_upgrade_reports_device_failure() {
+        let mut idle = idle_fake_device(FakeDevice::new(0, None, 0));
+        match idle.flash_upgrade(&[":10000000DEADBEEF", ":BAD"], |_| {}) {
+            Err(FlashUpgradeError::UpgradeFailed(output)) => {
+                assert!(output.contains("upgrade failed"), "output: {output:?}");
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(()) => panic!("flash_upgrade() succeeded despite `upgrade failed`"),
+        }
+        // The device is back at its prompt; the terminal must be usable again.
+        let hostname = idle
+            .exec_sync("hostname", Some(Duration::from_secs(1)))
+            .expect("hostname after a failed upgrade");
+        assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
     }
 }
