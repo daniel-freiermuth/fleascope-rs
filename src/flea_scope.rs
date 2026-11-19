@@ -1,9 +1,8 @@
 use crate::flea_connector::{FleaConnector, FleaConnectorError};
 use crate::serial_terminal::{
-    BusyFleaTerminal, ConnectionLostError, FleaTerminalError, IdleFleaTerminal,
+    BusyFleaTerminal, ConnectionLostError, FleaTerminalError, IdleFleaTerminal, TerminalStatus,
 };
 use crate::trigger_config::{DigitalTrigger, StringifiedTriggerConfig, TriggerConfig};
-use polars::prelude::*;
 use std::io::Read;
 use std::time::Duration;
 
@@ -60,6 +59,9 @@ pub enum CaptureConfigError {
 
     #[error("Calibration error: {0}")]
     Calibration(#[from] CalibrationError),
+
+    #[error("Malformed capture: {0}")]
+    MalformedCapture(#[from] ParseError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,86 +76,122 @@ pub enum CalibrationError {
     UnstableSignal,
 
     #[error("Failure while processing calibration data")]
-    CalibrationDataError(#[from] PolarsError),
+    CalibrationDataError(#[from] ParseError),
 
     #[error("Serial terminal error: {0}")]
     SerialTerminal(#[from] FleaTerminalError),
 }
 
-pub struct ScopeReading {
-    pub effective_msps: f64,
-    pub data: Vec<u8>,
+#[derive(Debug, thiserror::Error)]
+pub enum ParseError {
+    #[error("Capture contained no samples")]
+    Empty,
+
+    #[error("Malformed capture line {line}: {content:?}")]
+    MalformedLine {
+        /// 0-based line index within the capture response.
+        line: usize,
+        content: String,
+    },
 }
 
-pub const RAW_COLUMN_NAME: &str = "bnc_raw";
-pub const CALIBRATED_COLUMN_NAME: &str = "bnc_calibrated";
-pub const BITMAP_COLUMN_NAME: &str = "bitmap";
-pub const TIME_COLUMN_NAME: &str = "time";
+/// One parsed capture: uniformly sampled analog ADC counts plus the digital bitmap.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScopeReading {
+    /// Effective sample rate in million samples per second.
+    msps: f64,
+    /// Uncalibrated ADC counts of the BNC input; convert with [`FleaProbe::voltages`].
+    raw_bnc: Vec<u16>,
+    /// Digital inputs, bit `n` = channel `n`. Same length as `raw_bnc`.
+    bitmap: Vec<u16>,
+}
 
 impl ScopeReading {
-    pub fn parse_csv(&self) -> Result<LazyFrame, PolarsError> {
-        profiling::scope!("parse_csv");
-
-        let df = CsvReadOptions::default()
-            .with_has_header(false)
-            // The firmware prints `%d,%x`: bitmaps are unprefixed hex, so an
-            // all-digit capture would otherwise infer as an integer column.
-            .with_dtype_overwrite(Some(Arc::new(vec![DataType::Float64, DataType::String])))
-            .into_reader_with_file_handle(std::io::Cursor::new(&self.data))
-            .finish()?
-            .lazy()
-            .select([
-                col("column_1").alias(RAW_COLUMN_NAME),
-                col("column_2").alias(BITMAP_COLUMN_NAME),
-            ])
-            .with_row_index("row_index", Some(0))
-            .with_columns([
-                // Create time column using row index - more efficient than separate vector creation
-                (col("row_index").cast(DataType::Float64)
-                    * lit(1.0 / (self.effective_msps * 1_000_000.0)))
-                .alias(TIME_COLUMN_NAME),
-            ])
-            .select([
-                col(TIME_COLUMN_NAME),
-                col(RAW_COLUMN_NAME),
-                col(BITMAP_COLUMN_NAME),
-            ]);
-
-        Ok(df)
+    pub fn len(&self) -> usize {
+        self.raw_bnc.len()
     }
 
-    /// Extract bits from bitmap column
-    pub fn extract_bits(mut df: &mut DataFrame) -> Result<&DataFrame, PolarsError> {
-        profiling::scope!("extract_bits");
+    pub fn is_empty(&self) -> bool {
+        self.raw_bnc.is_empty()
+    }
 
-        let bitmap_column = df.column(BITMAP_COLUMN_NAME)?;
-        let bitmap_strings = bitmap_column.str()?;
+    /// Uncalibrated ADC counts of the BNC input, one per sample.
+    pub fn raw_bnc(&self) -> &[u16] {
+        &self.raw_bnc
+    }
 
-        // Parse hex strings and extract bits
-        let mut bit_columns: Vec<Vec<bool>> = vec![Vec::new(); 10];
+    /// Digital inputs, one bitmap per sample; bit `n` = channel `n`.
+    pub fn bitmap(&self) -> &[u16] {
+        &self.bitmap
+    }
 
-        for bitmap_opt in bitmap_strings.iter() {
-            if let Some(bitmap_str) = bitmap_opt
-                && let Ok(bitmap_val) = u32::from_str_radix(bitmap_str.trim_start_matches("0x"), 16)
-            {
-                for (bit, column) in bit_columns.iter_mut().enumerate().take(10) {
-                    column.push((bitmap_val >> bit) & 1 == 1);
-                }
-            } else {
-                // Default to false for null or unparseable values
-                for column in bit_columns.iter_mut().take(10) {
-                    column.push(false);
-                }
+    /// Time of sample `index` in seconds from the start of the capture.
+    pub fn time(&self, index: usize) -> f64 {
+        index as f64 / (self.msps * 1_000_000.0)
+    }
+
+    /// Time of every sample in seconds from the start of the capture.
+    pub fn times(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        (0..self.len()).map(|i| self.time(i))
+    }
+
+    /// State of digital `channel` for every sample. Channels beyond the
+    /// bitmap width (16 and up) read as low.
+    pub fn bit(&self, channel: u8) -> impl ExactSizeIterator<Item = bool> + '_ {
+        self.bitmap.iter().map(move |b| {
+            b.checked_shr(u32::from(channel))
+                .is_some_and(|v| v & 1 == 1)
+        })
+    }
+
+    /// Parse the device's `<adc>,<hex bitmap>` lines.
+    fn from_wire_bytes(msps: f64, bytes: &[u8]) -> Result<Self, ParseError> {
+        profiling::scope!("ScopeReading::from_wire_bytes");
+
+        let mut raw = Vec::with_capacity(IdleFleaScope::TOTAL_SAMPLES as usize);
+        let mut bitmap = Vec::with_capacity(IdleFleaScope::TOTAL_SAMPLES as usize);
+        for (line, content) in bytes.split(|&b| b == b'\n').enumerate() {
+            let content = content.trim_ascii();
+            if content.is_empty() {
+                continue;
             }
+            let (adc, bits) =
+                Self::parse_line(content).ok_or_else(|| ParseError::MalformedLine {
+                    line,
+                    content: String::from_utf8_lossy(content).into_owned(),
+                })?;
+            raw.push(adc);
+            bitmap.push(bits);
         }
-
-        for (bit, values) in bit_columns.into_iter().enumerate() {
-            let column: Column = Series::new(format!("bit_{bit}").into(), values).into();
-            df = df.with_column(column)?;
+        if raw.is_empty() {
+            return Err(ParseError::Empty);
         }
-
-        Ok(df)
+        Ok(Self {
+            msps,
+            raw_bnc: raw,
+            bitmap,
+        })
     }
+
+    fn parse_line(line: &[u8]) -> Option<(u16, u16)> {
+        let line = std::str::from_utf8(line).ok()?;
+        let (adc, bits) = line.split_once(',')?;
+        let bits = bits.trim();
+        let bits = bits.strip_prefix("0x").unwrap_or(bits);
+        Some((
+            adc.trim().parse().ok()?,
+            u16::from_str_radix(bits, 16).ok()?,
+        ))
+    }
+}
+
+/// Outcome of polling a [`ReadingFleaScope`].
+#[must_use]
+pub enum ReadStatus {
+    /// Still capturing; poll again later.
+    Pending(ReadingFleaScope),
+    /// Capture finished; the scope is idle again whether or not the data parsed.
+    Done(IdleFleaScope, Result<ScopeReading, ParseError>),
 }
 
 pub struct ReadingFleaScope {
@@ -164,26 +202,21 @@ pub struct ReadingFleaScope {
 }
 
 impl ReadingFleaScope {
-    pub fn try_get_result(
-        mut self,
-    ) -> Result<Result<(IdleFleaScope, ScopeReading), Self>, ConnectionLostError> {
+    pub fn try_get_result(mut self) -> Result<ReadStatus, ConnectionLostError> {
         profiling::scope!("try_get_result");
 
         match self.serial.try_get_result()? {
-            Ok((data, idle_terminal)) => Ok(Ok((
+            TerminalStatus::Done(data, idle_terminal) => Ok(ReadStatus::Done(
                 IdleFleaScope {
                     serial: idle_terminal,
                     _ver: self._ver,
                     hostname: self.hostname,
                 },
-                ScopeReading {
-                    effective_msps: self.effective_msps,
-                    data,
-                },
-            ))),
-            Err(busy_terminal) => {
+                ScopeReading::from_wire_bytes(self.effective_msps, &data),
+            )),
+            TerminalStatus::Pending(busy_terminal) => {
                 self.serial = busy_terminal;
-                Ok(Err(self))
+                Ok(ReadStatus::Pending(self))
             }
         }
     }
@@ -365,10 +398,7 @@ impl IdleFleaScope {
             Self::prepare_read_command(time_frame, trigger_fields, delay)?;
 
         let data = self.serial.exec_sync(&command, None)?;
-        Ok(ScopeReading {
-            effective_msps,
-            data,
-        })
+        Ok(ScopeReading::from_wire_bytes(effective_msps, &data)?)
     }
 
     pub fn stream(self) -> Result<StreamingScope, (Self, FleaTerminalError)> {
@@ -533,13 +563,16 @@ impl FleaProbe {
         Ok(())
     }
 
-    pub fn apply_calibration(&self, df: LazyFrame) -> Result<LazyFrame, CalibrationError> {
-        profiling::scope!("apply_calibration");
-
-        Ok(df.with_column(
-            self.raw_to_voltage(col(RAW_COLUMN_NAME))?
-                .alias(CALIBRATED_COLUMN_NAME),
-        ))
+    /// Calibrated BNC voltages for `raw` ADC counts, e.g. [`ScopeReading::raw_bnc`]
+    /// or a batch from [`StreamingScope::read`].
+    pub fn voltages<'a>(
+        &self,
+        raw: &'a [u16],
+    ) -> Result<impl ExactSizeIterator<Item = f64> + 'a, CalibrationError> {
+        let (cal_zero, cal_3v3) = self.require_calibration()?;
+        Ok(raw
+            .iter()
+            .map(move |&r| Self::to_voltage(f64::from(r), cal_zero, cal_3v3)))
     }
 
     /// Read a stable value for calibration purposes
@@ -551,40 +584,48 @@ impl FleaProbe {
             .is_matching()
             .into_trigger_fields();
 
-        let bnc_values: Vec<f64> =
-            match scope.read_sync(Duration::from_millis(20), trigger_fields, None) {
-                Err(CaptureConfigError::SerialTerminal(e)) => return Err(e.into()),
-                reading => reading.expect(
-                    "This should not fail, as we are reading a stable value for calibration",
-                ),
-            }
-            .parse_csv()?
-            .select([col(RAW_COLUMN_NAME)])
-            .collect()?
-            .column(RAW_COLUMN_NAME)?
-            .f64()?
-            .into_no_null_iter()
-            .collect();
+        let capture = match scope.read_sync(Duration::from_millis(20), trigger_fields, None) {
+            Err(CaptureConfigError::SerialTerminal(e)) => return Err(e.into()),
+            Err(CaptureConfigError::MalformedCapture(e)) => return Err(e.into()),
+            reading => reading
+                .expect("This should not fail, as we are reading a stable value for calibration"),
+        };
 
-        let min_val = bnc_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max_val = bnc_values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let min_val = capture
+            .raw_bnc
+            .iter()
+            .min()
+            .map_or(f64::INFINITY, |&v| f64::from(v));
+        let max_val = capture
+            .raw_bnc
+            .iter()
+            .max()
+            .map_or(f64::NEG_INFINITY, |&v| f64::from(v));
 
         if max_val - min_val > 14.0 {
             return Err(CalibrationError::UnstableSignal);
         }
 
-        let mean = bnc_values.iter().sum::<f64>() / bnc_values.len() as f64;
-        Ok(mean)
+        let sum: f64 = capture.raw_bnc.iter().map(|&v| f64::from(v)).sum();
+        Ok(sum / capture.len() as f64)
     }
 
     /// Convert raw ADC value to voltage
-    pub fn raw_to_voltage(&self, raw_value: Expr) -> Result<Expr, CalibrationError> {
-        let cal_zero = self
-            .cal_zero
-            .ok_or(CalibrationError::NoCalibrationPresent)?;
-        let cal_3v3 = self.cal_3v3.ok_or(CalibrationError::NoCalibrationPresent)?;
+    pub fn raw_to_voltage(&self, raw_value: f64) -> Result<f64, CalibrationError> {
+        let (cal_zero, cal_3v3) = self.require_calibration()?;
+        Ok(Self::to_voltage(raw_value, cal_zero, cal_3v3))
+    }
 
-        Ok((raw_value - cal_zero.into()) / cal_3v3.into() * 3.3.into())
+    fn to_voltage(raw_value: f64, cal_zero: f64, cal_3v3: f64) -> f64 {
+        (raw_value - cal_zero) / cal_3v3 * 3.3
+    }
+
+    fn require_calibration(&self) -> Result<(f64, f64), CalibrationError> {
+        Ok((
+            self.cal_zero
+                .ok_or(CalibrationError::NoCalibrationPresent)?,
+            self.cal_3v3.ok_or(CalibrationError::NoCalibrationPresent)?,
+        ))
     }
 
     /// Convert voltage to raw ADC value
@@ -667,42 +708,11 @@ mod tests {
     const CAPTURE: &[u8] = b"2048,0\r\n2100,3ff\r\n1996,205\r\n2500,0\r\n";
 
     fn reading_of(data: &[u8]) -> ScopeReading {
-        ScopeReading {
-            effective_msps: 2.0,
-            data: data.to_vec(),
-        }
+        ScopeReading::from_wire_bytes(2.0, data).unwrap()
     }
 
     fn reading() -> ScopeReading {
         reading_of(CAPTURE)
-    }
-
-    fn bitmap_strings(df: &DataFrame) -> Vec<Option<&str>> {
-        df.column(BITMAP_COLUMN_NAME)
-            .unwrap()
-            .str()
-            .unwrap()
-            .iter()
-            .collect()
-    }
-
-    fn f64_column(df: &DataFrame, name: &str) -> Vec<f64> {
-        df.column(name)
-            .unwrap()
-            .f64()
-            .unwrap()
-            .into_no_null_iter()
-            .collect()
-    }
-
-    fn bool_column(df: &DataFrame, name: &str) -> Vec<bool> {
-        df.column(name)
-            .unwrap()
-            .bool()
-            .unwrap()
-            .iter()
-            .collect::<Option<Vec<bool>>>()
-            .unwrap()
     }
 
     fn assert_close(got: &[f64], want: &[f64]) {
@@ -713,66 +723,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_csv_yields_time_raw_and_bitmap_columns() {
-        let df = reading().parse_csv().unwrap().collect().unwrap();
+    fn parse_yields_time_raw_and_bitmap() {
+        let capture = reading();
 
-        let names: Vec<&str> = df.get_column_names().iter().map(|n| n.as_str()).collect();
-        assert_eq!(
-            names,
-            [TIME_COLUMN_NAME, RAW_COLUMN_NAME, BITMAP_COLUMN_NAME]
-        );
         // 2 MSPS → 0.5 µs per sample.
         assert_close(
-            &f64_column(&df, TIME_COLUMN_NAME),
+            &capture.times().collect::<Vec<_>>(),
             &[0.0, 0.5e-6, 1.0e-6, 1.5e-6],
         );
-        assert_eq!(
-            f64_column(&df, RAW_COLUMN_NAME),
-            [2048.0, 2100.0, 1996.0, 2500.0]
-        );
-        assert_eq!(
-            bitmap_strings(&df),
-            [Some("0"), Some("3ff"), Some("205"), Some("0")]
-        );
+        assert_eq!(capture.raw_bnc(), [2048, 2100, 1996, 2500]);
+        assert_eq!(capture.bitmap(), [0x0, 0x3ff, 0x205, 0x0]);
     }
 
     #[test]
-    fn parse_csv_keeps_all_digit_bitmaps_as_hex() {
-        // No hex letters anywhere, so dtype inference alone would pick an integer.
-        let mut df = reading_of(b"2048,0\r\n2049,10\r\n2047,205\r\n")
-            .parse_csv()
-            .unwrap()
-            .collect()
-            .unwrap();
-        assert_eq!(bitmap_strings(&df), [Some("0"), Some("10"), Some("205")]);
+    fn parse_reads_all_digit_bitmaps_as_hex() {
+        let capture = reading_of(b"2048,0\r\n2049,10\r\n2047,205\r\n");
 
-        ScopeReading::extract_bits(&mut df).unwrap();
         // 0x10 = bit 4; 0x205 = bits 0, 2 and 9.
-        assert_eq!(bool_column(&df, "bit_0"), [false, false, true]);
-        assert_eq!(bool_column(&df, "bit_2"), [false, false, true]);
-        assert_eq!(bool_column(&df, "bit_4"), [false, true, false]);
-        assert_eq!(bool_column(&df, "bit_9"), [false, false, true]);
+        assert_eq!(capture.bit(0).collect::<Vec<_>>(), [false, false, true]);
+        assert_eq!(capture.bit(2).collect::<Vec<_>>(), [false, false, true]);
+        assert_eq!(capture.bit(4).collect::<Vec<_>>(), [false, true, false]);
+        assert_eq!(capture.bit(9).collect::<Vec<_>>(), [false, false, true]);
     }
 
     #[test]
-    fn parse_csv_accepts_hex_letters_after_digit_only_rows() {
-        // Hex letters first appear after polars' default 100-row inference window.
-        let mut data = b"2048,0\r\n".repeat(150);
-        data.extend_from_slice(b"2048,3ff\r\n");
-        let mut df = reading_of(&data).parse_csv().unwrap().collect().unwrap();
-        assert_eq!(df.height(), 151);
-        assert_eq!(bitmap_strings(&df)[150], Some("3ff"));
-
-        ScopeReading::extract_bits(&mut df).unwrap();
-        let bit_9 = bool_column(&df, "bit_9");
-        assert!(bit_9[150]);
-        assert!(bit_9[..150].iter().all(|&b| !b));
-    }
-
-    #[test]
-    fn extract_bits_splits_hex_bitmap_into_bit_columns() {
-        let mut df = reading().parse_csv().unwrap().collect().unwrap();
-        ScopeReading::extract_bits(&mut df).unwrap();
+    fn bit_splits_hex_bitmap_into_channels() {
+        let capture = reading();
 
         // 0x205 = bits 0, 2 and 9.
         let expected: [[bool; 4]; 10] = [
@@ -787,32 +763,20 @@ mod tests {
             [false, true, false, false],
             [false, true, true, false],
         ];
-        for (bit, want) in expected.iter().enumerate() {
-            assert_eq!(bool_column(&df, &format!("bit_{bit}")), want, "bit_{bit}");
+        for (bit, want) in (0u8..).zip(&expected) {
+            assert_eq!(&capture.bit(bit).collect::<Vec<_>>(), want, "bit_{bit}");
         }
-        assert!(df.column("bit_10").is_err());
     }
 
     #[test]
-    fn apply_calibration_maps_raw_to_volts() {
+    fn voltages_maps_raw_to_volts() {
         let mut probe = FleaProbe::new(ProbeType::X1);
         // 2048 → 0 V, 2048 + 1000 → 3.3 V.
         probe.set_calibration(2048.0, 1000.0);
 
-        let df = probe
-            .apply_calibration(reading().parse_csv().unwrap())
-            .unwrap()
-            .collect()
-            .unwrap();
+        let volts: Vec<f64> = probe.voltages(reading().raw_bnc()).unwrap().collect();
 
-        assert_close(
-            &f64_column(&df, CALIBRATED_COLUMN_NAME),
-            &[0.0, 0.1716, -0.1716, 1.4916],
-        );
-        assert_eq!(
-            f64_column(&df, RAW_COLUMN_NAME),
-            [2048.0, 2100.0, 1996.0, 2500.0]
-        );
+        assert_close(&volts, &[0.0, 0.1716, -0.1716, 1.4916]);
     }
 
     #[test]
@@ -823,7 +787,11 @@ mod tests {
             Err(CalibrationError::NoCalibrationPresent)
         ));
         assert!(matches!(
-            probe.raw_to_voltage(col(RAW_COLUMN_NAME)),
+            probe.raw_to_voltage(2048.0),
+            Err(CalibrationError::NoCalibrationPresent)
+        ));
+        assert!(matches!(
+            probe.voltages(&[2048]).map(Iterator::count),
             Err(CalibrationError::NoCalibrationPresent)
         ));
         assert!(matches!(
@@ -871,5 +839,43 @@ mod tests {
                 "{reply:?} gave {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_parse_capture() {
+        // Firmware prints "%d,%x"; older builds prefixed the bitmap with "0x".
+        let capture = reading_of(b"2048,1ff\r\n100,0x3\n\n4095,0\r\n");
+        assert_eq!(capture.raw_bnc(), [2048, 100, 4095]);
+        assert_eq!(capture.bitmap(), [0x1ff, 0x3, 0]);
+        assert_eq!(capture.times().collect::<Vec<_>>(), [0.0, 0.5e-6, 1.0e-6]);
+        assert_eq!(capture.bit(1).collect::<Vec<_>>(), [true, true, false]);
+        assert_eq!(capture.bit(8).collect::<Vec<_>>(), [true, false, false]);
+    }
+
+    #[test]
+    fn test_parse_capture_rejects_malformed_line() {
+        let err = ScopeReading::from_wire_bytes(1.0, b"1,0\nnot a sample\n").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::MalformedLine { line: 1, content } if content == "not a sample"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_capture_rejects_empty_response() {
+        for data in [&b""[..], b"\r\n\r\n"] {
+            assert!(matches!(
+                ScopeReading::from_wire_bytes(1.0, data),
+                Err(ParseError::Empty)
+            ));
+        }
+    }
+
+    #[test]
+    fn bit_beyond_bitmap_width_reads_low() {
+        let capture = reading_of(b"1,ffff\n");
+        assert_eq!(capture.bit(15).collect::<Vec<_>>(), [true]);
+        assert_eq!(capture.bit(16).collect::<Vec<_>>(), [false]);
+        assert_eq!(capture.bit(255).collect::<Vec<_>>(), [false]);
     }
 }

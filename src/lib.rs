@@ -12,7 +12,7 @@
 //! - **Trigger configuration**: Digital and analog triggers with builder patterns
 //! - **Data acquisition**: Raw oscilloscope data reading with automatic time indexing
 //! - **Calibration management**: Read/write probe calibrations from/to device flash
-//! - **`DataFrame` output**: Uses `polars` for efficient data handling instead of pandas
+//! - **Plain data output**: Captures arrive as a parsed [`ScopeReading`] of typed slices; no dataframe dependency
 //! - **Type safety**: Strong typing and error handling throughout
 //!
 //! ## Examples
@@ -33,8 +33,8 @@
 //! // Read data using default auto trigger
 //! let trigger = DigitalTrigger::start_capturing_when().is_matching().into_trigger_fields();
 //! let reading = scope.read_sync(Duration::from_millis(10), trigger, None)?;
-//! let data = reading.parse_csv()?;
-//! println!("Captured {} samples", data.collect()?.height());
+//! let volts: Vec<f64> = x1_probe.voltages(reading.raw_bnc())?.collect();
+//! println!("Captured {} samples, first at {} V", reading.len(), volts[0]);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -78,7 +78,7 @@
 //!     .starts_matching()
 //!     .into_trigger_fields();
 //! let reading = scope.read_sync(Duration::from_millis(5), digital_trigger, None)?;
-//! let data = reading.parse_csv()?;
+//! let bit0_high = reading.bit(0).filter(|&high| high).count();
 //!
 //! // Read with analog trigger (using raw ADC value)
 //! let analog_trigger = AnalogTrigger::new(500, AnalogTriggerBehavior::Rising)
@@ -88,14 +88,12 @@
 //!     analog_trigger,
 //!     Some(Duration::from_micros(500))
 //! )?;
-//! let data = reading.parse_csv()?;
 //!
 //! // You can also read without specific bit patterns (auto trigger)
 //! let auto_trigger = DigitalTrigger::start_capturing_when()
 //!     .is_matching()
 //!     .into_trigger_fields();
 //! let reading = scope.read_sync(Duration::from_millis(5), auto_trigger, None)?;
-//! let data = reading.parse_csv()?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -139,4 +137,7 @@ pub use serial_terminal::{FleaTerminalError, IdleFleaTerminal, StatelessFleaTerm
 
 pub use flea_connector::{FleaConnector, FleaConnectorError, FleaDevice};
 
-pub use flea_scope::{FleaProbe, IdleFleaScope, ProbeType, Waveform};
+pub use flea_scope::{
+    FleaProbe, IdleFleaScope, ParseError, ProbeType, ReadStatus, ReadingFleaScope, ScopeReading,
+    Waveform,
+};
