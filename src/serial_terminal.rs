@@ -340,9 +340,7 @@ impl BusyFleaTerminal {
         (trimmed, IdleFleaTerminal::new(self.inner))
     }
 
-    pub fn try_get_result(
-        mut self,
-    ) -> Result<Result<(Vec<u8>, IdleFleaTerminal), Self>, ConnectionLostError> {
+    pub fn try_get_result(mut self) -> Result<TerminalStatus, ConnectionLostError> {
         profiling::scope!("BusyFleaTerminal::try_get_result");
 
         // There are 24000 bytes tranferred right now which takes 24ms at 1 MB/s
@@ -358,8 +356,11 @@ impl BusyFleaTerminal {
         // - Live sending of data. Seems like data is way faster than data transfer
 
         match self.inner.read_chunk(&mut self.response) {
-            Ok(true) => Ok(Ok(self.into_result())),
-            Ok(false) => Ok(Err(self)),
+            Ok(true) => {
+                let (data, idle) = self.into_result();
+                Ok(TerminalStatus::Done(data, idle))
+            }
+            Ok(false) => Ok(TerminalStatus::Pending(self)),
             Err(FleaTerminalError::ConnectionLost) => Err(ConnectionLostError),
             Err(e) => {
                 tracing::warn!("Serial read error, treating the connection as lost: {e}");
@@ -367,6 +368,15 @@ impl BusyFleaTerminal {
             }
         }
     }
+}
+
+/// Outcome of polling a [`BusyFleaTerminal`].
+#[must_use]
+pub enum TerminalStatus {
+    /// The command is still running; poll again later.
+    Pending(BusyFleaTerminal),
+    /// The prompt arrived: trimmed response and the terminal, idle again.
+    Done(Vec<u8>, IdleFleaTerminal),
 }
 
 impl Read for BusyFleaTerminal {

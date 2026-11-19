@@ -7,7 +7,7 @@ Fast Rust library for FleaScope oscilloscope devices. High-performance data acqu
 - Fearless state handling, guarded by type states
 - read_async for cancellable reads
 - Cross-Platform: Better device discovery and serial communication across Windows/Linux/macOS.
-- Output as Polars frames
+- Captures as plain typed `Vec`s — no dataframe dependency
 
 ## Quick Start
 
@@ -23,9 +23,8 @@ let trigger_config = DigitalTrigger::start_capturing_when()
                         .is_matching()
                         .into_trigger_fields()?;
 let reading = scope.read_sync(Duration::from_millis(10), trigger_config, None)?;
-let uncalibrated_frame : Polars::LazyFrame = reading.parse_csv();
-let calibrated_frame = x1.apply_calibration(uncalibrated_frame)?;
-println!("Captured {} samples", calibrated_frame.collect().height());
+let volts: Vec<f64> = x1.voltages(reading.raw_bnc())?.collect();
+println!("Captured {} samples", reading.len());
 ```
 
 ## Device Discovery
@@ -76,14 +75,14 @@ x1.write_calibration_to_flash(scope)?; // Save to device
 ## API Overview
 
 **Data Output:**
-All methods return `polars::DataFrame` with:
-- `time` - Time in seconds from trigger
-- `bnc` - Voltage values (auto-converted from ADC)  
-- `bitmap` - Digital bit values (hex string)
+`read_sync` returns, and polling `read_async` via `try_get_result` yields, a parsed `ScopeReading`:
+- `raw_bnc()` - uncalibrated ADC counts; `probe.voltages(reading.raw_bnc())?` yields volts (also accepts stream batches)
+- `bitmap()` - digital inputs, bit `n` = channel `n`; `reading.bit(n)` iterates one channel
+- `time(i)` / `times()` - seconds from trigger, derived from the sample rate
 
-Use `IdleFleaScope::extract_bits()` to convert bitmap to individual bit columns.
-
-Polars types (`LazyFrame`, `DataFrame`, `PolarsError`, `Expr`) are part of this crate's public API, and every polars 0.x minor release is semver-breaking. This crate depends on **polars 0.55**; a crate that passes these frames into its own polars code must depend on the same polars minor version.
+`ReadingFleaScope::try_get_result()` returns `Result<ReadStatus, ConnectionLostError>`:
+`ReadStatus::Pending(reading_scope)` while capturing, or `ReadStatus::Done(idle_scope, Result<ScopeReading, ParseError>)` —
+the idle scope comes back even when the capture is malformed.
 
 ## Related Projects
 
