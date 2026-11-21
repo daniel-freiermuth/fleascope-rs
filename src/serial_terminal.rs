@@ -88,7 +88,7 @@ impl StatelessFleaTerminal {
             Ok(bytes_read) if bytes_read > 0 => {
                 profiling::scope!("process_chunk_data");
 
-                response.extend_from_slice(&read_buffer[..bytes_read]);
+                response.extend(read_buffer.iter().take(bytes_read));
 
                 // Check if we have the prompt at the end
                 Ok(response.ends_with(PROMPT))
@@ -141,21 +141,7 @@ impl StatelessFleaTerminal {
             }
         }
 
-        // Remove the prompt from the end
-        let response_without_prompt = &response[..response.len() - PROMPT.len()];
-
-        // Trim leading/trailing ASCII whitespace (command echo, \r\n)
-        let start = response_without_prompt
-            .iter()
-            .position(|b| !b.is_ascii_whitespace())
-            .unwrap_or(response_without_prompt.len());
-        let end = response_without_prompt
-            .iter()
-            .rposition(|b| !b.is_ascii_whitespace())
-            .map_or(start, |i| i + 1);
-        let trimmed = response_without_prompt[start..end].to_vec();
-
-        Ok(trimmed)
+        Ok(strip_prompt_and_trim(&response))
     }
 
     /// Send CTRL-C character
@@ -192,7 +178,7 @@ impl StatelessFleaTerminal {
                 Ok(bytes_read) if bytes_read > 0 => {
                     prompt_window_extend(
                         &mut prompt_buffer,
-                        &read_buffer[..bytes_read],
+                        read_buffer.iter().take(bytes_read),
                         PROMPT_LEN,
                     );
                 }
@@ -273,11 +259,10 @@ impl IdleFleaTerminal {
         // alone takes a full port read timeout), so a short timeout would time
         // out, re-arm the resync, and never recover.
         self.ensure_synced(timeout)?;
-        self.inner.exec_sync(command, timeout).map_err(|e| {
+        self.inner.exec_sync(command, timeout).inspect_err(|_| {
             // The device may hold a partly written line or still answer
             // later; resync before the next command.
             self.needs_resync = true;
-            e
         })
     }
 }
@@ -323,20 +308,7 @@ impl BusyFleaTerminal {
     fn into_result(self) -> (Vec<u8>, IdleFleaTerminal) {
         profiling::scope!("BusyFleaTerminal::into_result");
 
-        // Remove the prompt from the end
-        let response_without_prompt = &self.response[..self.response.len() - PROMPT.len()];
-
-        // Trim leading/trailing ASCII whitespace (command echo, \r\n)
-        let start = response_without_prompt
-            .iter()
-            .position(|b| !b.is_ascii_whitespace())
-            .unwrap_or(response_without_prompt.len());
-        let end = response_without_prompt
-            .iter()
-            .rposition(|b| !b.is_ascii_whitespace())
-            .map_or(start, |i| i + 1);
-        let trimmed = response_without_prompt[start..end].to_vec();
-
+        let trimmed = strip_prompt_and_trim(&self.response);
         (trimmed, IdleFleaTerminal::new(self.inner))
     }
 
@@ -387,7 +359,21 @@ impl Read for BusyFleaTerminal {
     }
 }
 
-fn prompt_window_extend(buf: &mut VecDeque<u8>, new: &[u8], window_len: usize) {
+/// Drop the trailing prompt, then trim ASCII whitespace (command echo, `\r\n`).
+/// Callers only pass responses that end in `PROMPT`.
+fn strip_prompt_and_trim(response: &[u8]) -> Vec<u8> {
+    response
+        .strip_suffix(PROMPT)
+        .unwrap_or(response)
+        .trim_ascii()
+        .to_vec()
+}
+
+fn prompt_window_extend<'a>(
+    buf: &mut VecDeque<u8>,
+    new: impl IntoIterator<Item = &'a u8>,
+    window_len: usize,
+) {
     buf.extend(new);
     while buf.len() > window_len {
         buf.pop_front();
