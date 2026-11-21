@@ -59,6 +59,12 @@ impl AnalogTriggerBehavior {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("Bit index {bit} out of range, must be between 0 and 8")]
+pub struct BitIndexOutOfRange {
+    pub bit: usize,
+}
+
 #[derive(Debug)]
 #[must_use]
 pub struct BitTriggerBuilder {
@@ -72,51 +78,58 @@ impl BitTriggerBuilder {
         }
     }
 
-    pub fn set_bit(mut self, bit: usize, state: BitState) -> Self {
-        assert!(
-            (bit < self.bit_states.len()),
-            "Bit index {} out of range, must be between 0 and {}",
-            bit,
-            self.bit_states.len() - 1
-        );
-        self.bit_states[bit] = state;
+    pub fn set_bit(mut self, bit: usize, state: BitState) -> Result<Self, BitIndexOutOfRange> {
+        let slot = self
+            .bit_states
+            .get_mut(bit)
+            .ok_or(BitIndexOutOfRange { bit })?;
+        *slot = state;
+        Ok(self)
+    }
+
+    pub fn bit0(mut self, state: BitState) -> Self {
+        self.bit_states[0] = state;
         self
     }
 
-    pub fn bit0(self, state: BitState) -> Self {
-        self.set_bit(0, state)
+    pub fn bit1(mut self, state: BitState) -> Self {
+        self.bit_states[1] = state;
+        self
     }
 
-    pub fn bit1(self, state: BitState) -> Self {
-        self.set_bit(1, state)
+    pub fn bit2(mut self, state: BitState) -> Self {
+        self.bit_states[2] = state;
+        self
     }
 
-    pub fn bit2(self, state: BitState) -> Self {
-        self.set_bit(2, state)
+    pub fn bit3(mut self, state: BitState) -> Self {
+        self.bit_states[3] = state;
+        self
     }
 
-    pub fn bit3(self, state: BitState) -> Self {
-        self.set_bit(3, state)
+    pub fn bit4(mut self, state: BitState) -> Self {
+        self.bit_states[4] = state;
+        self
     }
 
-    pub fn bit4(self, state: BitState) -> Self {
-        self.set_bit(4, state)
+    pub fn bit5(mut self, state: BitState) -> Self {
+        self.bit_states[5] = state;
+        self
     }
 
-    pub fn bit5(self, state: BitState) -> Self {
-        self.set_bit(5, state)
+    pub fn bit6(mut self, state: BitState) -> Self {
+        self.bit_states[6] = state;
+        self
     }
 
-    pub fn bit6(self, state: BitState) -> Self {
-        self.set_bit(6, state)
+    pub fn bit7(mut self, state: BitState) -> Self {
+        self.bit_states[7] = state;
+        self
     }
 
-    pub fn bit7(self, state: BitState) -> Self {
-        self.set_bit(7, state)
-    }
-
-    pub fn bit8(self, state: BitState) -> Self {
-        self.set_bit(8, state)
+    pub fn bit8(mut self, state: BitState) -> Self {
+        self.bit_states[8] = state;
+        self
     }
 
     pub fn is_matching(self) -> DigitalTrigger {
@@ -255,5 +268,24 @@ impl TriggerConfig for AnalogTrigger {
         StringifiedTriggerConfig {
             trigger_fields: format!("{}{} 0", trigger_behavior_flag, self.level),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_bit_accepts_last_bit_and_rejects_out_of_range() {
+        let trigger = BitTriggerBuilder::new()
+            .set_bit(8, BitState::High)
+            .unwrap()
+            .is_matching();
+        assert_eq!(trigger.bit_states[8], BitState::High);
+
+        let err = BitTriggerBuilder::new()
+            .set_bit(9, BitState::High)
+            .unwrap_err();
+        assert_eq!(err, BitIndexOutOfRange { bit: 9 });
     }
 }

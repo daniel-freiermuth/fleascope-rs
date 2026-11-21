@@ -84,6 +84,10 @@ pub enum CalibrationError {
 
     #[error("Serial terminal error: {0}")]
     SerialTerminal(#[from] FleaTerminalError),
+
+    /// The fixed calibration capture was rejected by `read_sync`'s own validation.
+    #[error("Calibration capture rejected: {0}")]
+    CaptureRejected(Box<CaptureConfigError>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -463,10 +467,8 @@ impl StreamingScope {
         profiling::scope!("StreamingScope::read");
         let mut buffer = vec![0u8; n * 2];
         self.serial.read_exact(&mut buffer)?;
-        Ok(buffer
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect())
+        let (pairs, _) = buffer.as_chunks::<2>();
+        Ok(pairs.iter().map(|&pair| u16::from_le_bytes(pair)).collect())
     }
 }
 
@@ -597,10 +599,10 @@ impl FleaProbe {
             .into_trigger_fields();
 
         let capture = match scope.read_sync(Duration::from_millis(20), trigger_fields, None) {
+            Ok(reading) => reading,
             Err(CaptureConfigError::SerialTerminal(e)) => return Err(e.into()),
             Err(CaptureConfigError::MalformedCapture(e)) => return Err(e.into()),
-            reading => reading
-                .expect("This should not fail, as we are reading a stable value for calibration"),
+            Err(e) => return Err(CalibrationError::CaptureRejected(Box::new(e))),
         };
 
         let min_val = capture
