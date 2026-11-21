@@ -522,9 +522,10 @@ impl FleaProbe {
             &serial.exec_sync(&cal_3v3_command, Some(COMMAND_TIMEOUT))?,
         )?;
 
-        self.cal_zero = Some(f64::from(cal_zero_raw - 1000) + 2048.0);
-        self.cal_3v3 =
-            Some(f64::from(cal_3v3_raw - 1000) / f64::from(self.multiplier.to_multiplier()));
+        let (cal_zero, cal_3v3) =
+            calibration_from_flash(cal_zero_raw, cal_3v3_raw, self.multiplier.to_multiplier());
+        self.cal_zero = Some(cal_zero);
+        self.cal_3v3 = Some(cal_3v3);
 
         log::debug!(
             "Probe x{} calibration: cal_zero={:?}, cal_3v3={:?}",
@@ -695,6 +696,15 @@ fn parse_calibration_reply(command: &str, reply: &[u8]) -> Result<i32, FleaTermi
         })
 }
 
+/// Convert the integers stored in flash by
+/// [`FleaProbe::write_calibration_to_flash`] back to `(cal_zero, cal_3v3)`.
+fn calibration_from_flash(cal_zero_raw: i32, cal_3v3_raw: i32, multiplier: i32) -> (f64, f64) {
+    (
+        f64::from(cal_zero_raw) - 1000.0 + 2048.0,
+        (f64::from(cal_3v3_raw) - 1000.0) / f64::from(multiplier),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -851,6 +861,15 @@ mod tests {
                 "{reply:?} gave {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn calibration_from_flash_accepts_any_stored_integer() {
+        assert_eq!(calibration_from_flash(1000, 2000, 10), (2048.0, 100.0));
+        assert_eq!(
+            calibration_from_flash(i32::MIN, i32::MIN, 1),
+            (f64::from(i32::MIN) + 1048.0, f64::from(i32::MIN) - 1000.0)
+        );
     }
 
     #[test]
