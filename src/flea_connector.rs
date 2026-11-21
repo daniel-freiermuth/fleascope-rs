@@ -2,6 +2,10 @@ use crate::serial_terminal::{FleaTerminalError, IdleFleaTerminal, StatelessFleaT
 use std::thread;
 use std::time::Duration;
 
+/// Handshake attempts of the port-less connect; all but the last one end in a
+/// `reset` when the device does not answer in time.
+const CONNECT_ATTEMPTS: usize = 3;
+
 #[derive(Debug, Clone)]
 pub struct FleaDevice {
     pub name: String,
@@ -145,16 +149,28 @@ impl FleaConnector {
 
     /// Get a working serial connection, retrying if necessary
     fn get_working_serial(name: &str) -> Result<IdleFleaTerminal, FleaConnectorError> {
+        Self::get_working_serial_on(|| Self::get_device_port(name))
+    }
+
+    /// Open the port `find_port` yields; after a handshake timeout, reset the
+    /// device and look its port up again, for up to `CONNECT_ATTEMPTS` attempts
+    fn get_working_serial_on(
+        mut find_port: impl FnMut() -> Result<String, FleaConnectorError>,
+    ) -> Result<IdleFleaTerminal, FleaConnectorError> {
+        let mut attempt = 1;
         loop {
-            let port_candidate = Self::get_device_port(name)?;
+            let port_candidate = find_port()?;
             let serial = StatelessFleaTerminal::new(&port_candidate)?;
 
             match serial.try_into() {
                 Ok(s) => break Ok(s),
-                Err((mut serial, FleaTerminalError::Timeout { .. })) => {
+                Err((mut serial, FleaTerminalError::Timeout { .. }))
+                    if attempt < CONNECT_ATTEMPTS =>
+                {
                     log::debug!("Timeout during initialization, sending reset and retrying");
                     let _ = serial.send_reset(); // Ignore errors here
                     thread::sleep(Duration::from_secs(2));
+                    attempt += 1;
                     continue;
                 }
                 Err((_serial, e)) => return Err(e.into()),
@@ -211,6 +227,38 @@ mod tests {
                 FleaTerminalError::Timeout { .. }
             ))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "macOS ptys reject the IOSSIOSPEED ioctl serialport uses to set the baud rate on open"
+    )]
+    fn get_working_serial_gives_up_when_device_never_answers() {
+        // The device stays enumerated but ignores both "prompt on" and "reset".
+        let (_master, slave) = serialport::TTYPort::pair().unwrap();
+        let slave_path = serialport::SerialPort::name(&slave).unwrap();
+        drop(slave);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut lookups = 0;
+            let result = FleaConnector::get_working_serial_on(|| {
+                lookups += 1;
+                Ok(slave_path.clone())
+            });
+            let _ = tx.send((result.err(), lookups));
+        });
+        // Each attempt takes about 1s ("prompt on" timeout), each reset 2s.
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok((
+                Some(FleaConnectorError::SerialTerminal(FleaTerminalError::Timeout { .. })),
+                lookups,
+            )) => assert_eq!(lookups, CONNECT_ATTEMPTS),
+            Ok((other, _)) => panic!("expected Timeout error, got {other:?}"),
+            Err(_) => panic!("get_working_serial did not return within 30s on a silent device"),
+        }
     }
 
     #[test]
