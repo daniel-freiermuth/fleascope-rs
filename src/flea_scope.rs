@@ -467,8 +467,18 @@ impl StreamingScope {
         profiling::scope!("StreamingScope::read");
         let mut buffer = vec![0u8; n * 2];
         self.serial.read_exact(&mut buffer)?;
-        let (pairs, _) = buffer.as_chunks::<2>();
-        Ok(pairs.iter().map(|&pair| u16::from_le_bytes(pair)).collect())
+        Ok(Self::decode_samples(&buffer))
+    }
+
+    /// A bare `stream` runs with the firmware defaults `averaging = 1, bitwidth = 16`,
+    /// which send each 12-bit ADC reading left-shifted by 4 as a little-endian u16.
+    /// Undo the shift so batches are ADC counts like [`ScopeReading::raw_bnc`].
+    fn decode_samples(bytes: &[u8]) -> Vec<u16> {
+        let (pairs, _) = bytes.as_chunks::<2>();
+        pairs
+            .iter()
+            .map(|&pair| u16::from_le_bytes(pair) >> 4)
+            .collect()
     }
 }
 
@@ -724,6 +734,24 @@ mod tests {
     fn test_number1_to_prescaler() {
         assert!(IdleFleaScope::number1_to_prescaler(100).is_ok());
         assert!(IdleFleaScope::number1_to_prescaler(0).is_err());
+    }
+
+    /// A bare `stream` runs the firmware defaults `averaging = 1, bitwidth = 16`
+    /// (fleascope-fw cpustick/basic0.c), which send each 12-bit ADC reading as a
+    /// little-endian u16 left-shifted by 16 - 12 = 4 (cpustick/stream-command.c).
+    #[test]
+    fn stream_batches_decode_to_adc_counts() {
+        let wire: Vec<u8> = [2048u16, 0, 4095, 1000]
+            .iter()
+            .flat_map(|adc| (adc << 4).to_le_bytes())
+            .collect();
+        let batch = StreamingScope::decode_samples(&wire);
+        assert_eq!(batch, vec![2048, 0, 4095, 1000]);
+
+        let mut x1 = FleaProbe::new(ProbeType::X1);
+        x1.set_calibration(2048.0, 1000.0);
+        let volts: Vec<f64> = x1.voltages(&batch).unwrap().collect();
+        assert!(volts[0].abs() < 1e-9, "0 V input read as {} V", volts[0]);
     }
 
     /// Four samples as the firmware prints them: `printf("%d,%x\n", adc, bits)`
