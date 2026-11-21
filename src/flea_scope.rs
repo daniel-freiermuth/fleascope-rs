@@ -6,6 +6,10 @@ use crate::trigger_config::{DigitalTrigger, StringifiedTriggerConfig, TriggerCon
 use std::io::Read;
 use std::time::Duration;
 
+/// How long a command other than a capture may take to return the prompt.
+/// These answer right away; only a capture waits for its trigger.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeType {
     X1,
@@ -264,13 +268,16 @@ impl IdleFleaScope {
     /// Create a new `FleaScope` from an existing terminal connection
     pub fn new(mut serial: IdleFleaTerminal) -> Result<Self, FleaTerminalError> {
         log::debug!("Turning off echo");
-        serial.exec_sync("echo off", None)?;
+        serial.exec_sync("echo off", Some(COMMAND_TIMEOUT))?;
 
-        let ver = String::from_utf8_lossy(&serial.exec_sync("ver", None)?).into_owned();
+        let ver =
+            String::from_utf8_lossy(&serial.exec_sync("ver", Some(COMMAND_TIMEOUT))?).into_owned();
         log::debug!("FleaScope version: {ver}");
         // TODO: check if version is compatible
 
-        let hostname = String::from_utf8_lossy(&serial.exec_sync("hostname", None)?).into_owned();
+        let hostname =
+            String::from_utf8_lossy(&serial.exec_sync("hostname", Some(COMMAND_TIMEOUT))?)
+                .into_owned();
         log::debug!("FleaScope hostname: {hostname}");
         // TODO: check if hostname is correct
 
@@ -283,8 +290,10 @@ impl IdleFleaScope {
 
     /// Set the waveform generator
     pub fn set_waveform(&mut self, waveform: Waveform, hz: i32) -> Result<(), FleaTerminalError> {
-        self.serial
-            .exec_sync(&format!("wave {} {}", waveform.as_str(), hz), None)?;
+        self.serial.exec_sync(
+            &format!("wave {} {}", waveform.as_str(), hz),
+            Some(COMMAND_TIMEOUT),
+        )?;
         Ok(())
     }
 
@@ -397,6 +406,7 @@ impl IdleFleaScope {
         let (effective_msps, command) =
             Self::prepare_read_command(time_frame, trigger_fields, delay)?;
 
+        // No timeout: the capture waits for its trigger, which may take arbitrarily long.
         let data = self.serial.exec_sync(&command, None)?;
         Ok(ScopeReading::from_wire_bytes(effective_msps, &data)?)
     }
@@ -422,14 +432,14 @@ impl IdleFleaScope {
     /// Set the hostname
     pub fn set_hostname(&mut self, hostname: &str) -> Result<(), FleaTerminalError> {
         self.serial
-            .exec_sync(&format!("hostname {hostname}"), None)?;
+            .exec_sync(&format!("hostname {hostname}"), Some(COMMAND_TIMEOUT))?;
         self.hostname = hostname.to_string();
         Ok(())
     }
 
     pub fn teardown(mut self) {
-        let _ = self.serial.exec_sync("echo on", None);
-        let _ = self.serial.exec_sync("prompt on", None);
+        let _ = self.serial.exec_sync("echo on", Some(COMMAND_TIMEOUT));
+        let _ = self.serial.exec_sync("prompt on", Some(COMMAND_TIMEOUT));
     }
 }
 
@@ -487,7 +497,7 @@ impl FleaProbe {
                 self.multiplier.to_multiplier(),
                 self.multiplier.to_multiplier()
             ),
-            None,
+            Some(COMMAND_TIMEOUT),
         )?)
         .into_owned();
 
@@ -504,11 +514,13 @@ impl FleaProbe {
         let cal_zero_command = format!("print cal_zero_x{}", self.multiplier.to_multiplier());
         let cal_zero_raw = parse_calibration_reply(
             &cal_zero_command,
-            &serial.exec_sync(&cal_zero_command, None)?,
+            &serial.exec_sync(&cal_zero_command, Some(COMMAND_TIMEOUT))?,
         )?;
         let cal_3v3_command = format!("print cal_3v3_x{}", self.multiplier.to_multiplier());
-        let cal_3v3_raw =
-            parse_calibration_reply(&cal_3v3_command, &serial.exec_sync(&cal_3v3_command, None)?)?;
+        let cal_3v3_raw = parse_calibration_reply(
+            &cal_3v3_command,
+            &serial.exec_sync(&cal_3v3_command, Some(COMMAND_TIMEOUT))?,
+        )?;
 
         self.cal_zero = Some(f64::from(cal_zero_raw - 1000) + 2048.0);
         self.cal_3v3 =
@@ -549,7 +561,7 @@ impl FleaProbe {
                 self.multiplier.to_multiplier(),
                 zero_value
             ),
-            None,
+            Some(COMMAND_TIMEOUT),
         )?;
         scope.serial.exec_sync(
             &format!(
@@ -557,7 +569,7 @@ impl FleaProbe {
                 self.multiplier.to_multiplier(),
                 v3v3_value
             ),
-            None,
+            Some(COMMAND_TIMEOUT),
         )?;
 
         Ok(())
@@ -877,5 +889,53 @@ mod tests {
         assert_eq!(capture.bit(15).collect::<Vec<_>>(), [true]);
         assert_eq!(capture.bit(16).collect::<Vec<_>>(), [false]);
         assert_eq!(capture.bit(255).collect::<Vec<_>>(), [false]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "macOS ptys reject the IOSSIOSPEED ioctl serialport uses to set the baud rate on open"
+    )]
+    fn new_times_out_when_device_stops_answering() {
+        use crate::serial_terminal::StatelessFleaTerminal;
+        use std::io::{ErrorKind, Write};
+
+        // The master end plays a device that answers the `prompt on` of the
+        // terminal init, then stays silent but connected.
+        let (mut master, slave) = serialport::TTYPort::pair().unwrap();
+        let slave_path = serialport::SerialPort::name(&slave).unwrap();
+        drop(slave);
+        let stateless = StatelessFleaTerminal::new(&slave_path).unwrap();
+        let device = std::thread::spawn(move || {
+            let mut received = Vec::new();
+            let mut buf = [0u8; 64];
+            while !received.ends_with(b"prompt on\n") {
+                match master.read(&mut buf) {
+                    Ok(n) => received.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == ErrorKind::TimedOut => {}
+                    Err(e) => panic!("device read failed: {e}"),
+                }
+            }
+            master.write_all(b"> ").unwrap();
+            master
+        });
+        let idle = IdleFleaTerminal::try_from(stateless)
+            .map_err(|(_, e)| e)
+            .unwrap();
+        let _master = device.join().unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(IdleFleaScope::new(idle).err());
+        });
+        // `echo off` must give up after COMMAND_TIMEOUT; allow generous slack.
+        match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(Some(FleaTerminalError::Timeout { timeout })) => {
+                assert_eq!(timeout, COMMAND_TIMEOUT);
+            }
+            Ok(other) => panic!("expected Timeout error, got {other:?}"),
+            Err(_) => panic!("IdleFleaScope::new() did not return within 15s on a silent device"),
+        }
     }
 }
