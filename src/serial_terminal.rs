@@ -75,6 +75,8 @@ impl StatelessFleaTerminal {
                     log::debug!("Flushing serial port buffers thrice");
                 }
                 Err(e) if e.kind() == ErrorKind::TimedOut => break,
+                // A signal interrupted the read; nothing was read, so retry.
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) => return Err(FleaTerminalError::Io(e)),
             }
         }
@@ -99,6 +101,10 @@ impl StatelessFleaTerminal {
             }
             Err(e) if e.kind() == ErrorKind::TimedOut => {
                 // Timeout is expected in non-blocking reads
+                Ok(false)
+            }
+            Err(e) if e.kind() == ErrorKind::Interrupted => {
+                // A signal interrupted the read; nothing was read, the caller polls again
                 Ok(false)
             }
             Err(e) if e.kind() == ErrorKind::BrokenPipe => Err(FleaTerminalError::ConnectionLost),
@@ -198,6 +204,7 @@ impl StatelessFleaTerminal {
                 }
                 Ok(_) => {} // No data available right now, but no error
                 Err(e) if e.kind() == ErrorKind::TimedOut => {} // Timeout is expected in non-blocking reads
+                Err(e) if e.kind() == ErrorKind::Interrupted => {} // A signal interrupted the read; retry
                 Err(e) if e.kind() == ErrorKind::BrokenPipe => {
                     return Err(FleaTerminalError::ConnectionLost);
                 }
@@ -808,7 +815,9 @@ mod tests {
     /// real port's 70ms timeout); `line_reads` hands out at most one line per
     /// read, so a reply's output and its trailing prompt arrive separately.
     /// `bytes_to_read_fails` makes `bytes_to_read()` fail while `clear()`
-    /// still succeeds.
+    /// still succeeds. `interrupted_reads` makes that many reads fail with
+    /// `Interrupted` first, as a real port read does when a signal handler
+    /// runs during its `ppoll` (EINTR).
     struct FakeDevice {
         line: Vec<u8>,
         replies: std::cell::RefCell<VecDeque<u8>>,
@@ -819,6 +828,7 @@ mod tests {
         empty_read: Duration,
         line_reads: bool,
         bytes_to_read_fails: bool,
+        interrupted_reads: usize,
     }
 
     impl FakeDevice {
@@ -833,12 +843,17 @@ mod tests {
                 empty_read: Duration::from_millis(5),
                 line_reads: false,
                 bytes_to_read_fails: false,
+                interrupted_reads: 0,
             }
         }
     }
 
     impl Read for FakeDevice {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.interrupted_reads > 0 {
+                self.interrupted_reads -= 1;
+                return Err(ErrorKind::Interrupted.into());
+            }
             let mut replies = self.replies.borrow_mut();
             if self.stall > 0 || replies.is_empty() {
                 self.stall = self.stall.saturating_sub(1);
@@ -1131,5 +1146,55 @@ mod tests {
             Err((_, e)) => panic!("unexpected error: {e}"),
             Ok(_) => panic!("connecting succeeded despite a bytes_to_read() error"),
         }
+    }
+
+    #[test]
+    fn interrupted_read_in_try_get_result_keeps_polling() {
+        let mut device = FakeDevice::new(0, None, 0);
+        device.interrupted_reads = 1;
+        let mut busy = match idle_fake_device(device).exec_async("hostname") {
+            Ok(busy) => busy,
+            Err((_, e)) => panic!("unexpected error: {e}"),
+        };
+        let hostname = loop {
+            match busy.try_get_result() {
+                Ok(TerminalStatus::Pending(b)) => busy = b,
+                Ok(TerminalStatus::Done(data, _)) => break data,
+                Err(ConnectionLostError) => panic!("an interrupted read lost the connection"),
+            }
+        };
+        assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    #[test]
+    fn interrupted_read_in_cancel_still_returns_idle_terminal() {
+        let mut device = FakeDevice::new(0, None, 0);
+        device.interrupted_reads = 1;
+        let busy = match idle_fake_device(device).exec_async("hostname") {
+            Ok(busy) => busy,
+            Err((_, e)) => panic!("unexpected error: {e}"),
+        };
+        let mut idle = busy.cancel().expect("cancel() despite an interrupted read");
+        let hostname = idle
+            .exec_sync("hostname", Some(Duration::from_secs(1)))
+            .expect("hostname after cancel()");
+        assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    #[test]
+    fn interrupted_read_in_flush_still_connects() {
+        let mut device = FakeDevice::new(0, None, 0);
+        device.interrupted_reads = 1;
+        let stateless = StatelessFleaTerminal {
+            serial: Box::new(device),
+        };
+        let mut idle = match IdleFleaTerminal::try_from(stateless) {
+            Ok(idle) => idle,
+            Err((_, e)) => panic!("connecting failed on an interrupted read: {e}"),
+        };
+        let hostname = idle
+            .exec_sync("hostname", Some(Duration::from_secs(1)))
+            .expect("hostname after connecting");
+        assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
     }
 }
