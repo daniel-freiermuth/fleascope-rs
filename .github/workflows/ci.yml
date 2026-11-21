@@ -41,8 +41,10 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       # No `-D warnings`: Cargo.toml's [lints] table is the policy. Its
-      # `deny` lints (panic, todo, fallible_impl_from) and `forbid`
-      # (unsafe_code) fail the job; `warn` lints are reported only.
+      # `deny` lints (clippy::all, unwrap_used, expect_used, indexing_slicing,
+      # panic, todo, fallible_impl_from, unused_must_use) and `forbid`
+      # (unsafe_code) fail the job; `warn` lints (pedantic, nursery, cargo)
+      # are reported only. clippy.toml exempts tests from the panic family.
       - run: cargo clippy --locked --all-targets
 
   test:
