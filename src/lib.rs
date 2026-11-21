@@ -21,7 +21,6 @@
 //!
 //! ```rust,no_run
 //! use fleascope_rs::{IdleFleaScope, DigitalTrigger, Waveform};
-//! use fleascope_rs::trigger_config::TriggerConfig;
 //! use std::time::Duration;
 //!
 //! // Connect to any available FleaScope device
@@ -41,7 +40,7 @@
 //! ### Digital Trigger
 //!
 //! ```rust
-//! use fleascope_rs::trigger_config::{DigitalTrigger, BitState, TriggerConfig};
+//! use fleascope_rs::trigger_config::{DigitalTrigger, BitState};
 //!
 //! let trigger = DigitalTrigger::start_capturing_when()
 //!     .bit0(BitState::High)
@@ -55,7 +54,7 @@
 //! ### Analog Trigger
 //!
 //! ```rust
-//! use fleascope_rs::{trigger_config::{AnalogTrigger, AnalogTriggerBehavior, TriggerConfig}};
+//! use fleascope_rs::{trigger_config::{AnalogTrigger, AnalogTriggerBehavior}};
 //!
 //! // Create analog trigger directly with raw ADC value
 //! let trigger = AnalogTrigger::new(500, AnalogTriggerBehavior::Rising);
@@ -67,7 +66,7 @@
 //!
 //! ```rust,no_run
 //! use fleascope_rs::{IdleFleaScope, DigitalTrigger, AnalogTrigger, BitState};
-//! use fleascope_rs::trigger_config::{AnalogTriggerBehavior, TriggerConfig};
+//! use fleascope_rs::trigger_config::AnalogTriggerBehavior;
 //! use std::time::Duration;
 //!
 //! let (mut scope, x1_probe, x10_probe) = IdleFleaScope::connect(None, None, true)?;

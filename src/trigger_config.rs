@@ -1,9 +1,5 @@
 use crate::{FleaProbe, flea_scope::CaptureConfigError};
 
-pub trait TriggerConfig {
-    fn into_trigger_fields(self) -> StringifiedTriggerConfig;
-}
-
 pub struct StringifiedTriggerConfig {
     trigger_fields: String,
 }
@@ -160,10 +156,8 @@ impl DigitalTrigger {
     pub fn start_capturing_when() -> BitTriggerBuilder {
         BitTriggerBuilder::new()
     }
-}
 
-impl TriggerConfig for DigitalTrigger {
-    fn into_trigger_fields(self) -> StringifiedTriggerConfig {
+    pub fn into_trigger_fields(self) -> StringifiedTriggerConfig {
         let mut relevant_bits = 0u32;
         for (i, state) in self.bit_states.iter().enumerate() {
             if *state != BitState::DontCare {
@@ -246,10 +240,8 @@ impl AnalogTrigger {
             behavior: AnalogTriggerBehavior::Auto,
         }
     }
-}
 
-impl TriggerConfig for AnalogTrigger {
-    fn into_trigger_fields(self) -> StringifiedTriggerConfig {
+    pub fn into_trigger_fields(self) -> StringifiedTriggerConfig {
         let trigger_behavior_flag = self.behavior.as_str();
 
         StringifiedTriggerConfig {
