@@ -3,6 +3,20 @@
 All notable changes to fleascope-rs are documented here. Each release states
 the FleaScope firmware versions it supports.
 
+## [1.1.0] — 2026-11-23
+
+Supports firmware `>= 3.0.0, < 4.0.0`; digital stream needs `>= 3.1.0`.
+
+### Added
+- **Digital stream:** `IdleFleaScope::digital_stream(mask, us_per_sample,
+  n_samples_per_packet)` streams the selected digital inputs as packets,
+  decoded by `DigitalStreamingScope::read_packet` into one bitmap per sample;
+  `IdleFleaScope::compute_n_samples_per_packet` picks a packet size for a
+  ~50 ms latency. Parameters outside the firmware's limits are rejected before
+  anything is sent (`CaptureConfigError::InvalidChannelMask`,
+  `InvalidSamplesPerPacket`), and on firmware older than 3.1.0 with
+  `CaptureConfigError::DigitalStreamUnsupported`.
+
 ## [1.0.0] — 2026-11-23
 
 Supports firmware `>= 3.0.0, < 4.0.0`.
