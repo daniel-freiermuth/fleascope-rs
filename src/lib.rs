@@ -23,8 +23,10 @@
 //! use fleascope_rs::{IdleFleaScope, DigitalTrigger, Waveform};
 //! use std::time::Duration;
 //!
-//! // Connect to any available FleaScope device
-//! let (mut scope, x1_probe, x10_probe) = IdleFleaScope::connect(None, None, true)?;
+//! // Connect to any available FleaScope device (firmware 4.x)
+//! let (mut scope, mut x1_probe, _x10_probe) = IdleFleaScope::connect(None, None)?;
+//! // The device stores no calibration: restore the one the host saved
+//! x1_probe.set_calibration(2048.0, 1000.0);
 //!
 //! // Set up signal generator
 //! scope.set_waveform(Waveform::Sine, 1000)?; // 1kHz sine wave
@@ -69,7 +71,7 @@
 //! use fleascope_rs::trigger_config::AnalogTriggerBehavior;
 //! use std::time::Duration;
 //!
-//! let (mut scope, x1_probe, x10_probe) = IdleFleaScope::connect(None, None, true)?;
+//! let (mut scope, x1_probe, x10_probe) = IdleFleaScope::connect(None, None)?;
 //!
 //! // Read with digital trigger
 //! let digital_trigger = DigitalTrigger::start_capturing_when()

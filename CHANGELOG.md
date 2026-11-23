@@ -3,6 +3,33 @@
 All notable changes to fleascope-rs are documented here. Each release states
 the FleaScope firmware versions it supports.
 
+## [Unreleased]
+
+Supports firmware `>= 4.0.0, < 5.0.0`.
+
+### Breaking
+- **Firmware 4.0 required.** Connecting refuses 3.x with
+  `FleaConnectorError::UnsupportedFirmware`. Flashing with
+  `IdleFleaTerminal::flash_upgrade` still works on any firmware, so 3.x
+  devices can be upgraded.
+- **Calibration is kept by the host.** Firmware 4.0 no longer stores probe
+  calibration. `FleaProbe::read_calibration_from_flash` and
+  `write_calibration_to_flash` are removed, and `IdleFleaScope::connect` no
+  longer takes `read_calibrations`: probes start uncalibrated; restore a saved
+  calibration with `FleaProbe::set_calibration` or measure one with
+  `calibrate_0`/`calibrate_3v3`.
+- `CaptureConfigError::DigitalStreamUnsupported` is removed: every supported
+  firmware has digital stream.
+
+### Changed
+- `stream` sends `stream 2333 4 16`. Firmware 4.0's plain `stream` would send
+  single unaveraged readings; these arguments keep the 3.x rate (~51.4 ksps)
+  and averaging, and `StreamingScope::read` still returns the rounded mean of
+  4 readings as 12-bit ADC counts.
+- `digital_stream` periods above ~8.7 ms are no longer clamped by the
+  firmware: `compute_n_samples_per_packet` uses the real rate, and periods
+  above 139 808 µs are rejected with `CaptureConfigError::InvalidSamplePeriod`.
+
 ## [1.1.0] — 2026-11-23
 
 Supports firmware `>= 3.0.0, < 4.0.0`; digital stream needs `>= 3.1.0`.

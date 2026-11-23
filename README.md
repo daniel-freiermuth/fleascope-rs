@@ -11,14 +11,15 @@ Fast Rust library for FleaScope oscilloscope devices. High-performance data acqu
 
 ## Quick Start
 
-Connect and read data in just a few lines:
+Requires FleaScope firmware 4.x. Connect and read data in just a few lines:
 
 ```rust
 use fleascope_rs::{IdleFleaScope, DigitalTrigger};
 use std::time::Duration;
 
 // Connect and acquire data
-let mut (scope, x1, x10) = IdleFleaScope::connect("FleaScope", None, true)?;
+let (mut scope, mut x1, x10) = IdleFleaScope::connect(None, None)?;
+x1.set_calibration(saved_zero, saved_3v3); // calibration the host stored
 let trigger_config = DigitalTrigger::start_capturing_when()
                         .is_matching()
                         .into_trigger_fields()?;
@@ -63,13 +64,16 @@ let data = scope.read_sync(Duration::from_millis(5), trigger.into_trigger_fields
 
 ## Calibration
 
+Firmware 4 does not store probe calibration; the host keeps it.
+
 ```rust
-let mut (scope, x1, x10) = FleaScope::connect(None, None, true)?;
+let (mut scope, mut x1, x10) = IdleFleaScope::connect(None, None)?;
 
 // Connect probe to ground, then 3.3V
-let zero_value = x1.calibrate_0(scope)?;
-let full_scale = x1.calibrate_3v3(scope)?;
-x1.write_calibration_to_flash(scope)?; // Save to device
+let zero_value = x1.calibrate_0(&mut scope)?;
+let full_scale = x1.calibrate_3v3(&mut scope)?;
+// Persist (zero_value, full_scale) yourself; restore later with
+x1.set_calibration(zero_value, full_scale);
 ```
 
 ## API Overview
