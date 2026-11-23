@@ -349,6 +349,8 @@ impl IdleFleaTerminal {
     ///
     /// `on_progress` is called after each record line is sent with current progress.
     /// After a successful flash the device resets itself; the connection will be dead.
+    /// The device erases its parameter pages first, so the hostname returns to
+    /// `Flea-Scope` whether the upgrade succeeds or fails.
     pub fn flash_upgrade(
         &mut self,
         hex_lines: &[&str],

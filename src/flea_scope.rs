@@ -64,8 +64,8 @@ pub enum CaptureConfigError {
     #[error("Invalid samples per packet {requested} (must be 1..={max} for this channel mask)")]
     InvalidSamplesPerPacket { requested: u32, max: u32 },
 
-    #[error("Digital stream requires firmware 3.1.0 or newer; the device reports {0:?}")]
-    DigitalStreamUnsupported(Option<(u32, u32, u32)>),
+    #[error("Invalid digital sample period {requested} µs (max {max} µs)")]
+    InvalidSamplePeriod { requested: u32, max: u32 },
 
     #[error("Serial terminal error: {0}")]
     SerialTerminal(#[from] FleaTerminalError),
@@ -249,7 +249,7 @@ impl ReadingFleaScope {
 
 pub struct IdleFleaScope {
     serial: IdleFleaTerminal,
-    /// Raw `ver` output, e.g. `"3.1.0 (checksum 0x1a2b)"`.
+    /// Raw `ver` output, e.g. `"4.0.0 (checksum 0x1a2b)"`.
     firmware_version: String,
     hostname: String,
 }
@@ -267,12 +267,12 @@ impl IdleFleaScope {
     ///
     /// The firmware follows Semantic Versioning: MAJOR bumps on breaking wire-protocol
     /// changes, MINOR on backwards-compatible additions, PATCH on bug fixes. The driver
-    /// therefore accepts one major version, from the minor it relies on upwards.
-    pub const MIN_FIRMWARE_VERSION: (u32, u32, u32) = (3, 0, 0);
+    /// therefore accepts one major version, from the minor it relies on upwards:
+    /// 4.0.0 changed the `stream` command to take explicit parameters and to send
+    /// samples scaled to the requested bit width.
+    pub const MIN_FIRMWARE_VERSION: (u32, u32, u32) = (4, 0, 0);
     /// First firmware version that is no longer supported (next major).
-    pub const MAX_FIRMWARE_VERSION: (u32, u32, u32) = (4, 0, 0);
-    /// First firmware version with the `digital_stream` command.
-    const DIGITAL_STREAM_MIN_FIRMWARE_VERSION: (u32, u32, u32) = (3, 1, 0);
+    pub const MAX_FIRMWARE_VERSION: (u32, u32, u32) = (5, 0, 0);
 
     fn check_firmware_version(version: (u32, u32, u32)) -> Result<(), FleaConnectorError> {
         if (Self::MIN_FIRMWARE_VERSION..Self::MAX_FIRMWARE_VERSION).contains(&version) {
@@ -310,22 +310,30 @@ impl IdleFleaScope {
         Some((major, minor, patch))
     }
 
-    /// Connect to a `FleaScope` device
+    /// `stream` arguments that reproduce the 3.x stream: 2333 bus-clock ticks
+    /// (≈ 51.4 ksps), the sum of 4 of the 5 interleaved readings, 16 bits per
+    /// sample. The firmware sends the 14-bit sum shifted left by 2 as a
+    /// little-endian u16; [`StreamingScope::read`] turns it back into the
+    /// rounded mean, a 12-bit ADC count like [`ScopeReading::raw_bnc`].
+    const STREAM_COMMAND: &str = "stream 2333 4 16";
+
+    /// Longest `digital_stream` sample period the firmware accepts.
+    const DIGITAL_STREAM_MAX_US_PER_SAMPLE: u32 = 139_808;
+
+    /// Connect to a `FleaScope` device. Firmware 4 does not store probe
+    /// calibration, so the probes start uncalibrated; restore a calibration the
+    /// host kept with [`FleaProbe::set_calibration`] or measure one.
     pub fn connect(
         name: Option<&str>,
         port: Option<&str>,
-        read_calibrations: bool,
     ) -> Result<(Self, FleaProbe, FleaProbe), FleaConnectorError> {
         let serial = FleaConnector::connect(name, port)?;
-        let mut x1 = FleaProbe::new(ProbeType::X1);
-        let mut x10 = FleaProbe::new(ProbeType::X10);
-
-        let mut scope = Self::new(serial)?;
-        if read_calibrations {
-            x1.read_calibration_from_flash(&mut scope.serial)?;
-            x10.read_calibration_from_flash(&mut scope.serial)?;
-        }
-        Ok((scope, x1, x10))
+        let scope = Self::new(serial)?;
+        Ok((
+            scope,
+            FleaProbe::new(ProbeType::X1),
+            FleaProbe::new(ProbeType::X10),
+        ))
     }
 
     /// Create a new `FleaScope` from an existing terminal connection.
@@ -485,7 +493,7 @@ impl IdleFleaScope {
     }
 
     pub fn stream(self) -> Result<StreamingScope, (Self, FleaTerminalError)> {
-        match self.serial.exec_async("stream") {
+        match self.serial.exec_async(Self::STREAM_COMMAND) {
             Ok(serial) => Ok(StreamingScope {
                 firmware_version: self.firmware_version,
                 hostname: self.hostname,
@@ -502,7 +510,9 @@ impl IdleFleaScope {
         }
     }
 
-    /// Start a digital bit-banging stream. Requires firmware 3.1.0 or newer.
+    /// Start a digital bit-banging stream.
+    /// `us_per_sample`: sample period, `0` for as fast as possible, at most
+    /// 139 808 µs.
     /// `n_samples_per_packet`: pre-agreed number of samples per packet; the
     /// firmware packs exactly this many samples into each flush with no inline
     /// header.  Use [`Self::compute_n_samples_per_packet`] to derive the value;
@@ -514,9 +524,14 @@ impl IdleFleaScope {
         us_per_sample: u32,
         n_samples_per_packet: u32,
     ) -> Result<DigitalStreamingScope, (Self, CaptureConfigError)> {
-        let version = Self::parse_firmware_version(&self.firmware_version);
-        if version.is_none_or(|v| v < Self::DIGITAL_STREAM_MIN_FIRMWARE_VERSION) {
-            return Err((self, CaptureConfigError::DigitalStreamUnsupported(version)));
+        if us_per_sample > Self::DIGITAL_STREAM_MAX_US_PER_SAMPLE {
+            return Err((
+                self,
+                CaptureConfigError::InvalidSamplePeriod {
+                    requested: us_per_sample,
+                    max: Self::DIGITAL_STREAM_MAX_US_PER_SAMPLE,
+                },
+            ));
         }
         let packet_bytes = match Self::digital_packet_bytes(channel_mask, n_samples_per_packet) {
             Ok(packet_bytes) => packet_bytes,
@@ -566,20 +581,14 @@ impl IdleFleaScope {
 
     /// Compute the packet sample count that balances throughput vs host latency.
     /// - Free-run (`us_per_sample == 0`): fill a full 63-byte USB FS packet.
-    /// - Configured rate: target ~50 ms per packet (T3 clamps to ≥114 Hz).
+    /// - Configured rate: target ~50 ms per packet.
     pub fn compute_n_samples_per_packet(channel_mask: u16, us_per_sample: u32) -> u32 {
         let n_channels = channel_mask.count_ones().max(1);
         let max_samples = Self::DIGITAL_PACKET_BITS / n_channels;
         if us_per_sample == 0 {
             return max_samples;
         }
-        // T3 timer clamps at us_per_sample > 8738 → ~114 Hz actual.
-        let actual_rate_hz: u32 = if us_per_sample > 8738 {
-            114
-        } else {
-            1_000_000 / us_per_sample
-        };
-        let samples_50ms = (actual_rate_hz * 50 / 1000).max(1);
+        let samples_50ms = (50_000 / us_per_sample).max(1);
         samples_50ms.min(max_samples)
     }
 
@@ -617,8 +626,18 @@ impl StreamingScope {
         profiling::scope!("StreamingScope::read");
         let mut buffer = vec![0u8; n * 2];
         self.serial.read_exact(&mut buffer)?;
-        let (pairs, _) = buffer.as_chunks::<2>();
-        Ok(pairs.iter().map(|&pair| u16::from_le_bytes(pair)).collect())
+        Ok(Self::decode_samples(&buffer))
+    }
+
+    /// [`IdleFleaScope::STREAM_COMMAND`] makes the firmware send the sum of 4
+    /// 12-bit readings shifted left by 2. `(w + 8) >> 4` = `(sum + 2) >> 2` is
+    /// their rounded mean, exactly what 3.x firmware sent.
+    fn decode_samples(bytes: &[u8]) -> Vec<u16> {
+        let (pairs, _) = bytes.as_chunks::<2>();
+        pairs
+            .iter()
+            .map(|&pair| ((u32::from(u16::from_le_bytes(pair)) + 8) >> 4) as u16)
+            .collect()
     }
 }
 
@@ -697,93 +716,10 @@ impl FleaProbe {
         }
     }
 
-    pub fn read_calibration_from_flash(
-        &mut self,
-        serial: &mut IdleFleaTerminal,
-    ) -> Result<(), FleaTerminalError> {
-        let dim_result = String::from_utf8_lossy(&serial.exec_sync(
-            &format!(
-                "dim cal_zero_x{} as flash, cal_3v3_x{} as flash",
-                self.multiplier.to_multiplier(),
-                self.multiplier.to_multiplier()
-            ),
-            Some(COMMAND_TIMEOUT),
-        )?)
-        .into_owned();
-
-        let expected_response = format!(
-            "var 'cal_zero_x{}' already declared at this scope\r\nvar 'cal_3v3_x{}' already declared at this scope",
-            self.multiplier.to_multiplier(),
-            self.multiplier.to_multiplier()
-        );
-
-        if dim_result == expected_response {
-            log::debug!("Variables for calibration already declared. Reading values.");
-        }
-
-        let cal_zero_command = format!("print cal_zero_x{}", self.multiplier.to_multiplier());
-        let cal_zero_raw = parse_calibration_reply(
-            &cal_zero_command,
-            &serial.exec_sync(&cal_zero_command, Some(COMMAND_TIMEOUT))?,
-        )?;
-        let cal_3v3_command = format!("print cal_3v3_x{}", self.multiplier.to_multiplier());
-        let cal_3v3_raw = parse_calibration_reply(
-            &cal_3v3_command,
-            &serial.exec_sync(&cal_3v3_command, Some(COMMAND_TIMEOUT))?,
-        )?;
-
-        let (cal_zero, cal_3v3) =
-            calibration_from_flash(cal_zero_raw, cal_3v3_raw, self.multiplier.to_multiplier());
-        self.cal_zero = Some(cal_zero);
-        self.cal_3v3 = Some(cal_3v3);
-
-        log::debug!(
-            "Probe x{} calibration: cal_zero={:?}, cal_3v3={:?}",
-            self.multiplier.to_multiplier(),
-            self.cal_zero,
-            self.cal_3v3
-        );
-        Ok(())
-    }
-
     /// Set calibration values manually
     pub fn set_calibration(&mut self, offset_0: f64, offset_3v3: f64) {
         self.cal_zero = Some(offset_0);
         self.cal_3v3 = Some(offset_3v3);
-    }
-
-    /// Write calibration values to flash
-    pub fn write_calibration_to_flash(
-        &self,
-        scope: &mut IdleFleaScope,
-    ) -> Result<(), CalibrationError> {
-        let cal_zero = self
-            .cal_zero
-            .ok_or(CalibrationError::NoCalibrationPresent)?;
-        let cal_3v3 = self.cal_3v3.ok_or(CalibrationError::NoCalibrationPresent)?;
-
-        let zero_value = (cal_zero - 2048.0 + 1000.0 + 0.5) as i32;
-        let v3v3_value =
-            (cal_3v3.mul_add(f64::from(self.multiplier.to_multiplier()), 1000.0) + 0.5) as i32;
-
-        scope.serial.exec_sync(
-            &format!(
-                "cal_zero_x{} = {}",
-                self.multiplier.to_multiplier(),
-                zero_value
-            ),
-            Some(COMMAND_TIMEOUT),
-        )?;
-        scope.serial.exec_sync(
-            &format!(
-                "cal_3v3_x{} = {}",
-                self.multiplier.to_multiplier(),
-                v3v3_value
-            ),
-            Some(COMMAND_TIMEOUT),
-        )?;
-
-        Ok(())
     }
 
     /// Calibrated BNC voltages for `raw` ADC counts, e.g. [`ScopeReading::raw_bnc`]
@@ -893,28 +829,6 @@ impl FleaProbe {
     }
 }
 
-/// Parse the integer the device prints for a calibration variable. Anything
-/// else (a `StickOS` error message, line noise, non-UTF-8 bytes) is reported as
-/// an unexpected response rather than trusted.
-fn parse_calibration_reply(command: &str, reply: &[u8]) -> Result<i32, FleaTerminalError> {
-    std::str::from_utf8(reply)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .ok_or_else(|| FleaTerminalError::UnexpectedResponse {
-            command: command.into(),
-            response: String::from_utf8_lossy(reply).into(),
-        })
-}
-
-/// Convert the integers stored in flash by
-/// [`FleaProbe::write_calibration_to_flash`] back to `(cal_zero, cal_3v3)`.
-fn calibration_from_flash(cal_zero_raw: i32, cal_3v3_raw: i32, multiplier: i32) -> (f64, f64) {
-    (
-        f64::from(cal_zero_raw) - 1000.0 + 2048.0,
-        (f64::from(cal_3v3_raw) - 1000.0) / f64::from(multiplier),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -956,10 +870,12 @@ mod tests {
         assert_eq!(n(0x1, 1000), 50);
         // Capped by the packet size.
         assert_eq!(n(0x1ff, 10), 56);
-        // Slower than the T3 clamp (> 8738 µs) runs at ~114 Hz → 5 samples.
-        assert_eq!(n(0x1, 100_000), 5);
+        // 10 Hz → 0.5 samples in 50 ms, rounded up to 1.
+        assert_eq!(n(0x1, 100_000), 1);
+        // 50 Hz → 2 samples.
+        assert_eq!(n(0x1, 20_000), 2);
         // Never 0, and always accepted by digital_stream.
-        for (mask, us) in [(0x1, 1_000_000), (0x1ff, 0), (0x1ff, 8738), (0x3, 1)] {
+        for (mask, us) in [(0x1, 139_808), (0x1ff, 0), (0x1ff, 8738), (0x3, 1)] {
             assert!(IdleFleaScope::digital_packet_bytes(mask, n(mask, us)).is_ok());
         }
     }
@@ -986,6 +902,26 @@ mod tests {
     fn test_number1_to_prescaler() {
         assert!(IdleFleaScope::number1_to_prescaler(100).is_ok());
         assert!(IdleFleaScope::number1_to_prescaler(0).is_err());
+    }
+
+    /// `stream 2333 4 16` sends the sum of 4 readings shifted left by 2
+    /// (fleascope-fw docs/commands.md); decoding gives their rounded mean, like
+    /// 3.x firmware's `(sum + 2) >> 2`.
+    #[test]
+    fn stream_batches_decode_to_rounded_mean() {
+        let sums: [[u16; 4]; 4] = [[2048; 4], [0, 0, 0, 1], [4095; 4], [1000, 1000, 1001, 1001]];
+        let wire: Vec<u8> = sums
+            .iter()
+            .flat_map(|readings| (readings.iter().sum::<u16>() << 2).to_le_bytes())
+            .collect();
+        let batch = StreamingScope::decode_samples(&wire);
+        // (sum + 2) >> 2: 8192 → 2048, 1 → 0, 16380 → 4095, 4002 → 1001.
+        assert_eq!(batch, vec![2048, 0, 4095, 1001]);
+
+        let mut x1 = FleaProbe::new(ProbeType::X1);
+        x1.set_calibration(2048.0, 1000.0);
+        let volts: Vec<f64> = x1.voltages(&batch).unwrap().collect();
+        assert!(volts[0].abs() < 1e-9, "0 V input read as {} V", volts[0]);
     }
 
     /// Four samples as the firmware prints them: `printf("%d,%x\n", adc, bits)`
@@ -1101,42 +1037,6 @@ mod tests {
     }
 
     #[test]
-    fn calibration_reply_parses_printed_integer() {
-        assert_eq!(
-            parse_calibration_reply("print cal_zero_x1", b"1023").unwrap(),
-            1023
-        );
-        assert_eq!(
-            parse_calibration_reply("print cal_3v3_x1", b" -7\r").unwrap(),
-            -7
-        );
-    }
-
-    #[test]
-    fn calibration_reply_rejects_non_numeric_and_non_utf8() {
-        for reply in [&b"error - undefined variable"[..], b"", b"10\xff23"] {
-            let result = parse_calibration_reply("print cal_zero_x1", reply);
-            assert!(
-                matches!(
-                    &result,
-                    Err(FleaTerminalError::UnexpectedResponse { command, response })
-                        if &**command == "print cal_zero_x1" && **response == *String::from_utf8_lossy(reply)
-                ),
-                "{reply:?} gave {result:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn calibration_from_flash_accepts_any_stored_integer() {
-        assert_eq!(calibration_from_flash(1000, 2000, 10), (2048.0, 100.0));
-        assert_eq!(
-            calibration_from_flash(i32::MIN, i32::MIN, 1),
-            (f64::from(i32::MIN) + 1048.0, f64::from(i32::MIN) - 1000.0)
-        );
-    }
-
-    #[test]
     fn test_parse_capture() {
         // Firmware prints "%d,%x"; older builds prefixed the bitmap with "0x".
         let capture = reading_of(b"2048,1ff\r\n100,0x3\n\n4095,0\r\n");
@@ -1247,22 +1147,8 @@ mod tests {
 
     #[test]
     fn new_accepts_supported_firmware() {
-        let scope = connect_with_version("3.0.0 (checksum 0x1a2b)").expect("3.0.0 accepted");
+        let scope = connect_with_version("4.0.0 (checksum 0x1a2b)").expect("4.0.0 accepted");
         assert_eq!(scope.hostname, "smoke");
-    }
-
-    #[test]
-    fn digital_stream_requires_firmware_3_1() {
-        let scope = connect_with_version("3.0.0 (checksum 0x1a2b)").expect("3.0.0 accepted");
-        match scope.digital_stream(0x1, 0, 1) {
-            Err((_, CaptureConfigError::DigitalStreamUnsupported(found))) => {
-                assert_eq!(found, Some((3, 0, 0)));
-            }
-            Err((_, e)) => panic!("unexpected error {e}"),
-            Ok(_) => panic!("digital_stream started on firmware 3.0.0"),
-        }
-        let scope = connect_with_version("3.1.0 (checksum 0x1a2b)").expect("3.1.0 accepted");
-        assert!(scope.digital_stream(0x1, 0, 1).is_ok());
     }
 
     #[test]
@@ -1270,7 +1156,8 @@ mod tests {
         for (ver, found) in [
             ("2.27g (checksum 0x7c8e)", "2.27.0"),
             ("2.27k (checksum 0x1)", "2.27.0"),
-            ("4.0.0 (checksum 0x1)", "4.0.0"),
+            ("3.1.0 (checksum 0x1)", "3.1.0"),
+            ("5.0.0 (checksum 0x1)", "5.0.0"),
         ] {
             match connect_with_version(ver) {
                 Err(FleaConnectorError::UnsupportedFirmware { found: f, .. }) => {
@@ -1291,19 +1178,17 @@ mod tests {
     }
 
     #[test]
-    fn firmware_version_must_be_major_3() {
+    fn firmware_version_must_be_major_4() {
         let ok = |v| IdleFleaScope::check_firmware_version(v).is_ok();
-        assert!(ok((3, 0, 0)));
-        assert!(ok((3, 1, 0)));
-        assert!(ok((3, 7, 2)));
-        assert!(ok((3, 99, 99)));
-        assert!(!ok((2, 99, 99)));
-        assert!(!ok((4, 0, 0)));
-        assert!(!ok((5, 1, 0)));
+        assert!(ok((4, 0, 0)));
+        assert!(ok((4, 7, 2)));
+        assert!(ok((4, 99, 99)));
+        assert!(!ok((3, 99, 99)));
+        assert!(!ok((5, 0, 0)));
         assert!(matches!(
-            IdleFleaScope::check_firmware_version((4, 0, 0)),
+            IdleFleaScope::check_firmware_version((3, 1, 0)),
             Err(FleaConnectorError::UnsupportedFirmware { found, supported })
-                if found == "4.0.0" && supported == ">=3.0.0, <4.0.0"
+                if found == "3.1.0" && supported == ">=4.0.0, <5.0.0"
         ));
     }
 }
