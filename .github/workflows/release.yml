@@ -44,8 +44,14 @@ jobs:
           version_at() {
             git show "$1:Cargo.toml" | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1
           }
-          since=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
-          range=${since:+$since..}HEAD
+          # Scan only since the newest release tag. Without one, every old
+          # version bump would look unreleased, so refuse instead of guessing.
+          if ! since=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null); then
+            echo "::error::No v* tag is reachable from ${GITHUB_SHA:0:7}; push the existing release tags (git push origin --tags) and rerun."
+            exit 1
+          fi
+          echo "Scanning version bumps since $since"
+          range=$since..HEAD
           releases='[]'
           for sha in $(git rev-list --reverse --first-parent "$range"); do
             version=$(version_at "$sha")
