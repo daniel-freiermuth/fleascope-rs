@@ -45,6 +45,7 @@ impl Waveform {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CaptureConfigError {
     #[error("Time frame too large (max 3.49 seconds)")]
     TimeFrameTooLarge,
@@ -69,6 +70,7 @@ pub enum CaptureConfigError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CalibrationError {
     #[error("No zero calibration available for this probe")]
     NoZeroCalibrarion,
@@ -91,6 +93,7 @@ pub enum CalibrationError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ParseError {
     #[error("Capture contained no samples")]
     Empty,

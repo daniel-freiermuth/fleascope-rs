@@ -25,6 +25,7 @@ pub struct FlashProgress {
 
 /// Errors that can occur during a firmware flash upgrade.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FlashUpgradeError {
     #[error("Serial terminal error: {0}")]
     Terminal(#[from] FleaTerminalError),
@@ -53,6 +54,7 @@ pub struct IdleFleaTerminal {
 pub struct ConnectionLostError;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FleaTerminalError {
     #[error("Serial port error: {0}")]
     SerialPort(#[from] serialport::Error),

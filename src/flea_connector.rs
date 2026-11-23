@@ -13,6 +13,7 @@ pub struct FleaDevice {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FleaConnectorError {
     #[error("Serial terminal error: {0}")]
     SerialTerminal(#[from] FleaTerminalError),
