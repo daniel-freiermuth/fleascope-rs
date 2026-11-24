@@ -205,7 +205,7 @@ impl AnalogTriggerBuilder {
     pub fn into_trigger(self, flea_probe: &FleaProbe) -> Result<AnalogTrigger, CaptureConfigError> {
         let raw_level = (flea_probe.voltage_to_raw(self.volts)? / 4.0 + 0.5) as i16;
 
-        if !(-1023..=1023).contains(&raw_level) {
+        if !(0..=1023).contains(&raw_level) {
             return Err(CaptureConfigError::VoltageOutOfRange);
         }
         Ok(AnalogTrigger::new(raw_level, self.behavior))
@@ -258,5 +258,23 @@ mod tests {
             .set_bit(9, BitState::High)
             .unwrap_err();
         assert_eq!(err, BitIndexOutOfRange { bit: 9 });
+    }
+
+    #[test]
+    fn into_trigger_rejects_levels_below_zero_raw() {
+        let mut probe = FleaProbe::new(crate::flea_scope::ProbeType::X1);
+        probe.set_calibration(2048.0, 1000.0);
+
+        let err = AnalogTrigger::start_capturing_when(-10.0)
+            .level()
+            .into_trigger(&probe)
+            .unwrap_err();
+        assert!(matches!(err, CaptureConfigError::VoltageOutOfRange));
+
+        let trigger = AnalogTrigger::start_capturing_when(0.0)
+            .level()
+            .into_trigger(&probe)
+            .unwrap();
+        assert_eq!(trigger.into_trigger_fields().trigger_fields, "512 0");
     }
 }
