@@ -175,7 +175,9 @@ impl FleaConnector {
                     if attempt < CONNECT_ATTEMPTS =>
                 {
                     log::debug!("Timeout during initialization, sending reset and retrying");
-                    let _ = serial.send_reset(); // Ignore errors here
+                    if let Err(e) = serial.send_reset() {
+                        log::warn!("Sending reset to {port_candidate} failed: {e}");
+                    }
                     thread::sleep(Duration::from_secs(2));
                     attempt += 1;
                     continue;
