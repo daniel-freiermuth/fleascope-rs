@@ -29,6 +29,8 @@ Supports firmware `>= 4.0.0, < 5.0.0`.
 - `digital_stream` periods above ~8.7 ms are no longer clamped by the
   firmware: `compute_n_samples_per_packet` uses the real rate, and periods
   above 139 808 µs are rejected with `CaptureConfigError::InvalidSamplePeriod`.
+- A failed `reset` write during a connect retry is logged at warn level
+  instead of being discarded.
 
 ## [1.1.0] — 2026-11-23
 
