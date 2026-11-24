@@ -603,9 +603,12 @@ impl IdleFleaScope {
         Ok(())
     }
 
-    pub fn teardown(mut self) {
-        let _ = self.serial.exec_sync("echo on", Some(COMMAND_TIMEOUT));
-        let _ = self.serial.exec_sync("prompt on", Some(COMMAND_TIMEOUT));
+    /// Restore the interactive terminal (`echo on`, `prompt on`). Fails if
+    /// the device does not acknowledge either within `COMMAND_TIMEOUT`.
+    pub fn teardown(mut self) -> Result<(), FleaTerminalError> {
+        self.serial.exec_sync("echo on", Some(COMMAND_TIMEOUT))?;
+        self.serial.exec_sync("prompt on", Some(COMMAND_TIMEOUT))?;
+        Ok(())
     }
 }
 
@@ -1177,6 +1180,29 @@ mod tests {
         assert!(matches!(
             connect_with_version("garbage"),
             Err(FleaConnectorError::FirmwareVersionUnparseable { raw }) if raw == "garbage"
+        ));
+    }
+
+    #[test]
+    fn teardown_restores_interactive_terminal() {
+        let scope = connect_with_version("4.0.0 (checksum 0x1a2b)").expect("4.0.0 accepted");
+        scope
+            .teardown()
+            .expect("device acknowledges echo on / prompt on");
+    }
+
+    #[test]
+    fn teardown_reports_failure_to_restore() {
+        use crate::serial_terminal::tests::{FakeDevice, idle_fake_device};
+        // Every write to the device fails, so `echo on` never reaches it.
+        let scope = IdleFleaScope {
+            serial: idle_fake_device(FakeDevice::new(0, Some(0), usize::MAX)),
+            firmware_version: "4.0.0 (checksum 0x1a2b)".to_string(),
+            hostname: "smoke".to_string(),
+        };
+        assert!(matches!(
+            scope.teardown(),
+            Err(FleaTerminalError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut
         ));
     }
 

@@ -20,6 +20,9 @@ Supports firmware `>= 4.0.0, < 5.0.0`.
   `calibrate_0`/`calibrate_3v3`.
 - `CaptureConfigError::DigitalStreamUnsupported` is removed: every supported
   firmware has digital stream.
+- `IdleFleaScope::teardown` returns `Result<(), FleaTerminalError>` instead of
+  `()`: a device that does not acknowledge `echo on` / `prompt on` within 5 s
+  is reported instead of silently ignored.
 
 ### Changed
 - `stream` sends `stream 2333 4 16`. Firmware 4.0's plain `stream` would send
