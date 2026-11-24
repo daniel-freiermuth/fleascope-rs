@@ -61,6 +61,18 @@ pub struct BitIndexOutOfRange {
     pub bit: usize,
 }
 
+/// Generates fixed-index builder setters (`bit0`..`bit8`) on `BitTriggerBuilder`.
+macro_rules! bit_setters {
+    ($($name:ident => $idx:literal),* $(,)?) => {
+        $(
+            pub fn $name(mut self, state: BitState) -> Self {
+                self.bit_states[$idx] = state;
+                self
+            }
+        )*
+    };
+}
+
 #[derive(Debug)]
 #[must_use]
 pub struct BitTriggerBuilder {
@@ -83,50 +95,17 @@ impl BitTriggerBuilder {
         Ok(self)
     }
 
-    pub fn bit0(mut self, state: BitState) -> Self {
-        self.bit_states[0] = state;
-        self
-    }
-
-    pub fn bit1(mut self, state: BitState) -> Self {
-        self.bit_states[1] = state;
-        self
-    }
-
-    pub fn bit2(mut self, state: BitState) -> Self {
-        self.bit_states[2] = state;
-        self
-    }
-
-    pub fn bit3(mut self, state: BitState) -> Self {
-        self.bit_states[3] = state;
-        self
-    }
-
-    pub fn bit4(mut self, state: BitState) -> Self {
-        self.bit_states[4] = state;
-        self
-    }
-
-    pub fn bit5(mut self, state: BitState) -> Self {
-        self.bit_states[5] = state;
-        self
-    }
-
-    pub fn bit6(mut self, state: BitState) -> Self {
-        self.bit_states[6] = state;
-        self
-    }
-
-    pub fn bit7(mut self, state: BitState) -> Self {
-        self.bit_states[7] = state;
-        self
-    }
-
-    pub fn bit8(mut self, state: BitState) -> Self {
-        self.bit_states[8] = state;
-        self
-    }
+    bit_setters!(
+        bit0 => 0,
+        bit1 => 1,
+        bit2 => 2,
+        bit3 => 3,
+        bit4 => 4,
+        bit5 => 5,
+        bit6 => 6,
+        bit7 => 7,
+        bit8 => 8,
+    );
 
     pub fn is_matching(self) -> DigitalTrigger {
         DigitalTrigger::new(self.bit_states, DigitalTriggerBehavior::While)
