@@ -215,7 +215,6 @@ pub enum ReadStatus {
 }
 
 pub struct ReadingFleaScope {
-    firmware_version: String,
     hostname: String,
     serial: BusyFleaTerminal,
     effective_msps: f64,
@@ -229,7 +228,6 @@ impl ReadingFleaScope {
             TerminalStatus::Done(data, idle_terminal) => Ok(ReadStatus::Done(
                 IdleFleaScope {
                     serial: idle_terminal,
-                    firmware_version: self.firmware_version,
                     hostname: self.hostname,
                 },
                 ScopeReading::from_wire_bytes(self.effective_msps, &data),
@@ -244,7 +242,6 @@ impl ReadingFleaScope {
         let idle_serial = self.serial.cancel()?;
         Ok(IdleFleaScope {
             serial: idle_serial,
-            firmware_version: self.firmware_version,
             hostname: self.hostname,
         })
     }
@@ -252,8 +249,6 @@ impl ReadingFleaScope {
 
 pub struct IdleFleaScope {
     serial: IdleFleaTerminal,
-    /// Raw `ver` output, e.g. `"4.0.0 (checksum 0x1a2b)"`.
-    firmware_version: String,
     hostname: String,
 }
 
@@ -365,11 +360,7 @@ impl IdleFleaScope {
                 .into_owned();
         log::debug!("FleaScope hostname: {hostname}");
 
-        Ok(Self {
-            serial,
-            firmware_version: ver,
-            hostname,
-        })
+        Ok(Self { serial, hostname })
     }
 
     /// Set the waveform generator
@@ -461,7 +452,6 @@ impl IdleFleaScope {
         match Self::prepare_read_command(time_frame, trigger_fields, delay) {
             Ok((effective_msps, command)) => match self.serial.exec_async(&command) {
                 Ok(data) => Ok(ReadingFleaScope {
-                    firmware_version: self.firmware_version,
                     hostname: self.hostname,
                     serial: data,
                     effective_msps,
@@ -469,7 +459,6 @@ impl IdleFleaScope {
                 Err((serial, e)) => Err((
                     Self {
                         serial,
-                        firmware_version: self.firmware_version,
                         hostname: self.hostname,
                     },
                     e.into(),
@@ -498,14 +487,12 @@ impl IdleFleaScope {
     pub fn stream(self) -> Result<StreamingScope, (Self, FleaTerminalError)> {
         match self.serial.exec_async(Self::STREAM_COMMAND) {
             Ok(serial) => Ok(StreamingScope {
-                firmware_version: self.firmware_version,
                 hostname: self.hostname,
                 serial,
             }),
             Err((serial, e)) => Err((
                 Self {
                     serial,
-                    firmware_version: self.firmware_version,
                     hostname: self.hostname,
                 },
                 e,
@@ -544,7 +531,6 @@ impl IdleFleaScope {
             format!("digital_stream 0x{channel_mask:x} {us_per_sample} {n_samples_per_packet}");
         match self.serial.exec_async(&command) {
             Ok(serial) => Ok(DigitalStreamingScope {
-                firmware_version: self.firmware_version,
                 hostname: self.hostname,
                 channel_mask,
                 n_samples_per_packet: n_samples_per_packet as usize,
@@ -554,7 +540,6 @@ impl IdleFleaScope {
             Err((serial, e)) => Err((
                 Self {
                     serial,
-                    firmware_version: self.firmware_version,
                     hostname: self.hostname,
                 },
                 e.into(),
@@ -613,7 +598,6 @@ impl IdleFleaScope {
 }
 
 pub struct StreamingScope {
-    firmware_version: String,
     hostname: String,
     serial: BusyFleaTerminal,
 }
@@ -623,7 +607,6 @@ impl StreamingScope {
         let serial = self.serial.cancel()?;
         Ok(IdleFleaScope {
             serial,
-            firmware_version: self.firmware_version,
             hostname: self.hostname,
         })
     }
@@ -648,7 +631,6 @@ impl StreamingScope {
 }
 
 pub struct DigitalStreamingScope {
-    firmware_version: String,
     hostname: String,
     pub channel_mask: u16,
     /// Pre-agreed samples per packet — no inline header in the wire format.
@@ -663,7 +645,6 @@ impl DigitalStreamingScope {
         let serial = self.serial.cancel()?;
         Ok(IdleFleaScope {
             serial,
-            firmware_version: self.firmware_version,
             hostname: self.hostname,
         })
     }
@@ -1197,7 +1178,6 @@ mod tests {
         // Every write to the device fails, so `echo on` never reaches it.
         let scope = IdleFleaScope {
             serial: idle_fake_device(FakeDevice::new(0, Some(0), usize::MAX)),
-            firmware_version: "4.0.0 (checksum 0x1a2b)".to_string(),
             hostname: "smoke".to_string(),
         };
         assert!(matches!(
