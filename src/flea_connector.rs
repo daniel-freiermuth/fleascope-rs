@@ -49,8 +49,7 @@ impl FleaConnector {
             Self::validate_port(name, port)?;
             Self::open_port(port)?
         } else {
-            let device_name = name.unwrap_or("FleaScope");
-            Self::get_working_serial(device_name)?
+            Self::get_working_serial(name)?
         };
 
         Ok(terminal)
@@ -115,10 +114,17 @@ impl FleaConnector {
     pub fn get_available_devices(
         name: Option<&str>,
     ) -> Result<impl Iterator<Item = FleaDevice> + use<>, FleaConnectorError> {
-        let ports = serialport::available_ports()?;
+        Ok(Self::devices_among(serialport::available_ports()?, name))
+    }
+
+    /// The `FleaScope` devices among `ports`, only those named `name` if given
+    fn devices_among(
+        ports: Vec<serialport::SerialPortInfo>,
+        name: Option<&str>,
+    ) -> impl Iterator<Item = FleaDevice> + use<> {
         let name_owned = name.map(std::string::ToString::to_string);
 
-        Ok(ports.into_iter().filter_map(move |port_info| {
+        ports.into_iter().filter_map(move |port_info| {
             // Only consider USB devices
             if let serialport::SerialPortType::UsbPort(usb_info) = &port_info.port_type
                 && let Some(device_name) = usb_info.product.clone()
@@ -130,7 +136,7 @@ impl FleaConnector {
                 });
             }
             None
-        }))
+        })
     }
 
     /// Get all available `FleaScope` devices as a Vec (convenience method)
@@ -140,22 +146,29 @@ impl FleaConnector {
         Ok(Self::get_available_devices(name)?.collect())
     }
 
-    /// Get the port for a device with the given name
-    fn get_device_port(name: &str) -> Result<String, FleaConnectorError> {
-        log::debug!("Searching for FleaScope device with name {name}");
+    /// Get the port for a device with the given name, or for any device if `None`
+    fn get_device_port(name: Option<&str>) -> Result<String, FleaConnectorError> {
+        Self::find_device_port(name, serialport::available_ports()?)
+    }
 
-        let mut devices = Self::get_available_devices(Some(name))?;
+    /// Find the port of the first `FleaScope` device among `ports` with the given
+    /// name, or of the first one with any name if `None`
+    fn find_device_port(
+        name: Option<&str>,
+        ports: Vec<serialport::SerialPortInfo>,
+    ) -> Result<String, FleaConnectorError> {
+        log::debug!("Searching for FleaScope device with name {name:?}");
 
-        devices
+        Self::devices_among(ports, name)
             .next()
             .map(|device| device.port)
             .ok_or_else(|| FleaConnectorError::DeviceNotFound {
-                name: name.to_string(),
+                name: name.unwrap_or("FleaScope").to_string(),
             })
     }
 
     /// Get a working serial connection, retrying if necessary
-    fn get_working_serial(name: &str) -> Result<IdleFleaTerminal, FleaConnectorError> {
+    fn get_working_serial(name: Option<&str>) -> Result<IdleFleaTerminal, FleaConnectorError> {
         Self::get_working_serial_on(|| Self::get_device_port(name))
     }
 
@@ -311,6 +324,39 @@ mod tests {
         };
 
         assert!(!FleaConnector::validate_device(None, &invalid_port_info));
+    }
+
+    /// A USB serial port as `serialport` enumerates it
+    fn usb_port(port_name: &str, vid: u16, pid: u16, product: &str) -> serialport::SerialPortInfo {
+        serialport::SerialPortInfo {
+            port_name: port_name.to_string(),
+            port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+                vid,
+                pid,
+                serial_number: None,
+                manufacturer: None,
+                product: Some(product.to_string()),
+            }),
+        }
+    }
+
+    #[test]
+    fn find_device_port_without_name_accepts_any_fleascope_hostname() {
+        // Firmware 4.x reports its hostname as the USB product; the factory
+        // hostname, which every `upgrade` restores, is `Flea-Scope`.
+        let ports = vec![
+            usb_port("/dev/ttyUSB0", 0x0403, 0x6001, "FT232R USB UART"),
+            usb_port("/dev/ttyACM0", 0x04d8, 0xe66e, "Flea-Scope"),
+        ];
+
+        assert_eq!(
+            FleaConnector::find_device_port(None, ports.clone()).unwrap(),
+            "/dev/ttyACM0"
+        );
+        assert!(matches!(
+            FleaConnector::find_device_port(Some("FleaScope"), ports),
+            Err(FleaConnectorError::DeviceNotFound { name }) if name == "FleaScope"
+        ));
     }
 
     #[test]

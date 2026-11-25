@@ -35,6 +35,13 @@ Supports firmware `>= 4.0.0, < 5.0.0`.
 - A failed `reset` write during a connect retry is logged at warn level
   instead of being discarded.
 
+### Fixed
+- With no name, the port-less `FleaConnector::connect(None, None)` (and so
+  `IdleFleaScope::connect(None, None)`) connects to any FleaScope. It only
+  accepted the USB product name `FleaScope`, while firmware 4 reports its
+  hostname, `Flea-Scope` by default and after every `upgrade`, so it failed
+  with `DeviceNotFound`.
+
 ## [1.1.0] — 2026-11-23
 
 Supports firmware `>= 3.0.0, < 4.0.0`; digital stream needs `>= 3.1.0`.
