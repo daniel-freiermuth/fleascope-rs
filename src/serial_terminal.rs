@@ -6,6 +6,9 @@ use std::time::{Duration, Instant};
 const PROMPT: &[u8] = b"> ";
 /// How long `cancel()`, and a resync without a caller timeout, wait for the prompt.
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long `flush()` drains a device that keeps sending, e.g. one left
+/// streaming that a later CTRL-C has yet to stop, before giving up.
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long [`IdleFleaTerminal::flash_upgrade`] waits for the device to ask for HEX records.
 const UPGRADE_START_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long [`IdleFleaTerminal::flash_upgrade`] waits for the device to finish after the last record.
@@ -90,15 +93,21 @@ impl StatelessFleaTerminal {
         Ok(terminal)
     }
 
-    /// Flush the serial buffer
+    /// Flush the serial buffer. Drains until the device is quiet for a read
+    /// timeout, or for at most `FLUSH_TIMEOUT` while it keeps sending.
     fn flush(&mut self) -> Result<(), FleaTerminalError> {
         log::debug!("Flushing serial port buffers once");
+        let start = Instant::now();
         self.serial.clear(serialport::ClearBuffer::All)?;
-        while self.serial.bytes_to_read()? > 0 {
+        while self.serial.bytes_to_read()? > 0 && start.elapsed() < FLUSH_TIMEOUT {
             log::debug!("Flushing serial port buffers twice");
             self.serial.clear(serialport::ClearBuffer::Input)?;
         }
         loop {
+            if start.elapsed() >= FLUSH_TIMEOUT {
+                log::warn!("Device still sending after {FLUSH_TIMEOUT:?}, stopped flushing");
+                break;
+            }
             let mut buf = [0u8; 1024];
             match self.serial.read(&mut buf) {
                 Ok(n) => {
@@ -1345,6 +1354,49 @@ pub(crate) mod tests {
             .exec_sync("hostname", Some(Duration::from_secs(1)))
             .expect("hostname after connecting");
         assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "macOS ptys reject the IOSSIOSPEED ioctl serialport uses to set the baud rate on open"
+    )]
+    fn new_returns_on_device_that_keeps_sending() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // The master end plays a device left streaming (a `StreamingScope`
+        // dropped without `stop()`): 4 bytes every 5 ms, never quiet for a
+        // whole port read timeout.
+        let (mut master, slave) = serialport::TTYPort::pair().unwrap();
+        let slave_path = serialport::SerialPort::name(&slave).unwrap();
+        drop(slave);
+        let stop = Arc::new(AtomicBool::new(false));
+        let device = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = master.write_all(b"0123");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(StatelessFleaTerminal::new(&slave_path).err());
+        });
+        // new() must stop draining so the connect goes on to send the CTRL-C
+        // that stops the stream; allow generous slack.
+        let result = rx.recv_timeout(Duration::from_secs(10));
+        stop.store(true, Ordering::Relaxed);
+        device.join().unwrap();
+        match result {
+            Ok(None) => {}
+            Ok(Some(e)) => panic!("new() failed on a device that keeps sending: {e}"),
+            Err(_) => panic!("StatelessFleaTerminal::new did not return within 10s"),
+        }
     }
 
     #[test]

@@ -35,6 +35,11 @@ Supports firmware `>= 4.0.0, < 5.0.0`.
 - A failed `reset` write during a connect retry is logged at warn level
   instead of being discarded.
 
+### Fixed
+- Connecting to a device that keeps sending, such as one left streaming by a
+  `StreamingScope` dropped without `stop()`, no longer hangs: draining stale
+  input stops after 1 s, so the connect goes on to send CTRL-C.
+
 ## [1.1.0] — 2026-11-23
 
 Supports firmware `>= 3.0.0, < 4.0.0`; digital stream needs `>= 3.1.0`.
