@@ -35,6 +35,13 @@ Supports firmware `>= 4.0.0, < 5.0.0`.
 - A failed `reset` write during a connect retry is logged at warn level
   instead of being discarded.
 
+### Fixed
+- After `flash_upgrade` fails while the device is still reading HEX records
+  (a write error mid-stream, or a file without its end-of-file record), the
+  next command gets the device out of upgrade mode instead of timing out
+  forever: the resync now sends `prompt on` after CTRL-C instead of an empty
+  line, which the upgrade loop ignored.
+
 ## [1.1.0] — 2026-11-23
 
 Supports firmware `>= 3.0.0, < 4.0.0`; digital stream needs `>= 3.1.0`.
