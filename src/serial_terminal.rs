@@ -197,11 +197,16 @@ impl StatelessFleaTerminal {
 
     /// Idle-line resync. On StickOS, CTRL-C silently clears a partly typed line
     /// and prints no prompt (`sources/terminal.c` accumulate()); `"> "` only
-    /// follows a command line. So CTRL-C is followed by an empty line, a no-op
-    /// command that answers with a prompt. If an earlier command is still
+    /// follows a command line. So CTRL-C is followed by `prompt on`, the
+    /// command `try_from` already sends: at the prompt it only re-sets a RAM
+    /// flag and answers with a prompt. An empty line would not do: a failed
+    /// `flash_upgrade` can leave the device in its HEX-input loop
+    /// (`sources/flash.c` `flash_upgrade()`), which ignores CTRL-C, skips empty
+    /// lines without a reply, and ends with `upgrade failed` and a prompt only
+    /// on a non-empty, non-record line. If an earlier command is still
     /// running, CTRL-C stops it as in `cancel()`.
     fn resync(&mut self, timeout: Duration) -> Result<(), FleaTerminalError> {
-        self.serial.write_all(b"\x03\n")?;
+        self.serial.write_all(b"\x03prompt on\n")?;
         self.await_prompt_and_flush(timeout)
     }
 
@@ -949,10 +954,12 @@ pub(crate) mod tests {
     /// still succeeds. `interrupted_reads` makes that many reads fail with
     /// `Interrupted` first, as a real port read does when a signal handler
     /// runs during its `ppoll` (EINTR). `upgrade` asks for HEX records
-    /// without a prompt; HEX records get no reply, except the end-of-file
-    /// record (`paste done!`) and `:BAD` (`upgrade failed`). `max_read` caps
-    /// the bytes per read, so a message can straddle reads. `ver_reply` is
-    /// what `ver` prints before its prompt.
+    /// without a prompt and enters the HEX-input loop (`sources/flash.c`
+    /// `flash_upgrade()`): HEX records get no reply, except the end-of-file
+    /// record (`paste done!`) and `:BAD` (`upgrade failed`); an empty line is
+    /// skipped silently, and any other line aborts with `upgrade failed` and a
+    /// prompt. `max_read` caps the bytes per read, so a message can straddle
+    /// reads. `ver_reply` is what `ver` prints before its prompt.
     pub(crate) struct FakeDevice {
         line: Vec<u8>,
         replies: std::cell::RefCell<VecDeque<u8>>,
@@ -965,6 +972,7 @@ pub(crate) mod tests {
         bytes_to_read_fails: bool,
         interrupted_reads: usize,
         max_read: usize,
+        upgrading: bool,
         pub(crate) ver_reply: &'static str,
     }
 
@@ -986,6 +994,7 @@ pub(crate) mod tests {
                 bytes_to_read_fails: false,
                 interrupted_reads: 0,
                 max_read: usize::MAX,
+                upgrading: false,
                 ver_reply: "1.0",
             }
         }
@@ -1036,18 +1045,32 @@ pub(crate) mod tests {
                     0x03 => self.line.clear(),
                     b'\n' => {
                         let ver_reply;
-                        let reply: &[u8] = match self.line.as_slice() {
-                            b"ver" => {
+                        let reply: &[u8] = match (self.upgrading, self.line.as_slice()) {
+                            (false, b"ver") => {
                                 self.stall = self.ver_stall;
                                 ver_reply = format!("{}\r\n> ", self.ver_reply);
                                 ver_reply.as_bytes()
                             }
-                            b"hostname" => b"smoke\r\n> ",
-                            b"upgrade" => b"paste HEX upgrade file now\r\n",
-                            b":00000001FF" => b"paste done!\r\n",
-                            b":BAD" => b"upgrade failed\r\n> ",
-                            l if l.starts_with(b":") => b"",
-                            _ => b"> ",
+                            (false, b"hostname") => b"smoke\r\n> ",
+                            (false, b"upgrade") => {
+                                self.upgrading = true;
+                                b"paste HEX upgrade file now\r\n"
+                            }
+                            (false, _) => b"> ",
+                            (true, b"") => b"",
+                            (true, b":00000001FF") => {
+                                self.upgrading = false;
+                                b"paste done!\r\n"
+                            }
+                            (true, l) if l.starts_with(b":") && l != b":BAD" => b"",
+                            (true, l) => {
+                                self.upgrading = false;
+                                if l == b":BAD" {
+                                    b"upgrade failed\r\n> "
+                                } else {
+                                    b"\r\nbad record\r\nupgrade failed\r\n> "
+                                }
+                            }
                         };
                         replies.extend(reply);
                         self.line.clear();
@@ -1409,6 +1432,27 @@ pub(crate) mod tests {
         let hostname = idle
             .exec_sync("hostname", Some(Duration::from_secs(1)))
             .expect("hostname after a failed upgrade");
+        assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    #[test]
+    fn flash_upgrade_failed_write_leaves_upgrade_mode() {
+        // "upgrade\n" and the first record get through, the second record
+        // stalls after ":1000". The device stays in its HEX-input loop, which
+        // skips the empty line of a plain CTRL-C resync without any reply.
+        let budget = "upgrade\n:10000000DEADBEEF\n:1000".len();
+        let mut idle = idle_fake_device(FakeDevice::new(0, Some(budget), 1));
+        let records = [":10000000DEADBEEF", ":10000010DEADBEEF", ":00000001FF"];
+        match idle.flash_upgrade(&records, |_| {}) {
+            Err(FlashUpgradeError::Terminal(FleaTerminalError::Io(e))) => {
+                assert_eq!(e.kind(), ErrorKind::TimedOut);
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(()) => panic!("flash_upgrade() succeeded despite a failed write"),
+        }
+        let hostname = idle
+            .exec_sync("hostname", Some(Duration::from_secs(1)))
+            .expect("hostname after an aborted upgrade");
         assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
     }
 }
