@@ -35,6 +35,11 @@ Supports firmware `>= 4.0.0, < 5.0.0`.
 - A failed `reset` write during a connect retry is logged at warn level
   instead of being discarded.
 
+### Fixed
+- Connecting, `cancel()` and the resync after a failed command no longer hang
+  on a device that keeps sending: draining the port gives up after 1 s with
+  `FleaTerminalError::Timeout`.
+
 ## [1.1.0] — 2026-11-23
 
 Supports firmware `>= 3.0.0, < 4.0.0`; digital stream needs `>= 3.1.0`.
