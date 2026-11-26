@@ -6,6 +6,10 @@ use std::time::{Duration, Instant};
 const PROMPT: &[u8] = b"> ";
 /// How long `cancel()`, and a resync without a caller timeout, wait for the prompt.
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long `flush` drains a device that keeps sending before it gives up.
+/// Independent of the caller's timeout: a flush needs at least one 70ms port
+/// read timeout to see the line go quiet.
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long [`IdleFleaTerminal::flash_upgrade`] waits for the device to ask for HEX records.
 const UPGRADE_START_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long [`IdleFleaTerminal::flash_upgrade`] waits for the device to finish after the last record.
@@ -90,13 +94,20 @@ impl StatelessFleaTerminal {
         Ok(terminal)
     }
 
-    /// Flush the serial buffer
+    /// Flush the serial buffer. Fails with `Timeout` if the device is still
+    /// sending after `FLUSH_TIMEOUT`.
     fn flush(&mut self) -> Result<(), FleaTerminalError> {
+        let start = Instant::now();
         log::debug!("Flushing serial port buffers once");
         self.serial.clear(serialport::ClearBuffer::All)?;
         while self.serial.bytes_to_read()? > 0 {
             log::debug!("Flushing serial port buffers twice");
             self.serial.clear(serialport::ClearBuffer::Input)?;
+            if start.elapsed() >= FLUSH_TIMEOUT {
+                return Err(FleaTerminalError::Timeout {
+                    timeout: FLUSH_TIMEOUT,
+                });
+            }
         }
         loop {
             let mut buf = [0u8; 1024];
@@ -111,6 +122,11 @@ impl StatelessFleaTerminal {
                 // A signal interrupted the read; nothing was read, so retry.
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) => return Err(FleaTerminalError::Io(e)),
+            }
+            if start.elapsed() >= FLUSH_TIMEOUT {
+                return Err(FleaTerminalError::Timeout {
+                    timeout: FLUSH_TIMEOUT,
+                });
             }
         }
         Ok(())
@@ -952,7 +968,11 @@ pub(crate) mod tests {
     /// without a prompt; HEX records get no reply, except the end-of-file
     /// record (`paste done!`) and `:BAD` (`upgrade failed`). `max_read` caps
     /// the bytes per read, so a message can straddle reads. `ver_reply` is
-    /// what `ver` prints before its prompt.
+    /// what `ver` prints before its prompt. `chatty` models firmware stuck
+    /// printing that ignores CTRL-C: every read delivers another `CHATTER`
+    /// after 1ms, though nothing is pending right after `clear()`. With
+    /// `chatter_pending`, `bytes_to_read()` reports `CHATTER` pending even
+    /// right after `clear()`, like a device sending faster than it is cleared.
     pub(crate) struct FakeDevice {
         line: Vec<u8>,
         replies: std::cell::RefCell<VecDeque<u8>>,
@@ -965,6 +985,8 @@ pub(crate) mod tests {
         bytes_to_read_fails: bool,
         interrupted_reads: usize,
         max_read: usize,
+        chatty: bool,
+        chatter_pending: bool,
         pub(crate) ver_reply: &'static str,
     }
 
@@ -987,6 +1009,8 @@ pub(crate) mod tests {
                 interrupted_reads: 0,
                 max_read: usize::MAX,
                 ver_reply: "1.0",
+                chatty: false,
+                chatter_pending: false,
             }
         }
     }
@@ -996,6 +1020,12 @@ pub(crate) mod tests {
             if self.interrupted_reads > 0 {
                 self.interrupted_reads -= 1;
                 return Err(ErrorKind::Interrupted.into());
+            }
+            if self.chatty {
+                std::thread::sleep(Duration::from_millis(1));
+                let n = CHATTER.len().min(buf.len());
+                buf[..n].copy_from_slice(&CHATTER[..n]);
+                return Ok(n);
             }
             let mut replies = self.replies.borrow_mut();
             if self.stall > 0 || replies.is_empty() {
@@ -1073,6 +1103,9 @@ pub(crate) mod tests {
                     serialport::ErrorKind::Unknown,
                     "I/O error",
                 ));
+            }
+            if self.chatter_pending {
+                return Ok(CHATTER.len() as u32);
             }
             Ok(self.replies.borrow().len() as u32)
         }
@@ -1410,5 +1443,78 @@ pub(crate) mod tests {
             .exec_sync("hostname", Some(Duration::from_secs(1)))
             .expect("hostname after a failed upgrade");
         assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    /// What a `chatty` [`FakeDevice`] keeps printing; it ends in the prompt,
+    /// so `cancel()` finds one and goes on to flush.
+    const CHATTER: &[u8] = b"?\r\n> ";
+
+    #[test]
+    fn connect_times_out_when_device_keeps_printing() {
+        let mut device = FakeDevice::new(0, None, 0);
+        device.chatty = true;
+        let stateless = StatelessFleaTerminal {
+            serial: Box::new(device),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(IdleFleaTerminal::try_from(stateless).err().map(|(_, e)| e));
+        });
+        // The flush must give up after FLUSH_TIMEOUT; allow generous slack.
+        match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(Some(FleaTerminalError::Timeout { timeout })) => {
+                assert_eq!(timeout, FLUSH_TIMEOUT);
+            }
+            Ok(other) => panic!("expected Timeout error, got {other:?}"),
+            Err(_) => panic!("connecting did not return within 15s on a chatty device"),
+        }
+    }
+
+    #[test]
+    fn connect_times_out_when_device_floods_the_port() {
+        let mut device = FakeDevice::new(0, None, 0);
+        device.chatty = true;
+        device.chatter_pending = true;
+        let stateless = StatelessFleaTerminal {
+            serial: Box::new(device),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(IdleFleaTerminal::try_from(stateless).err().map(|(_, e)| e));
+        });
+        // Bytes are pending after every clear(), so the flush never gets past
+        // clearing; it must still give up after FLUSH_TIMEOUT.
+        match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(Some(FleaTerminalError::Timeout { timeout })) => {
+                assert_eq!(timeout, FLUSH_TIMEOUT);
+            }
+            Ok(other) => panic!("expected Timeout error, got {other:?}"),
+            Err(_) => panic!("connecting did not return within 15s on a flooding device"),
+        }
+    }
+
+    #[test]
+    fn cancel_times_out_when_device_keeps_printing() {
+        let mut device = FakeDevice::new(0, None, 0);
+        device.chatty = true;
+        let busy = BusyFleaTerminal {
+            inner: StatelessFleaTerminal {
+                serial: Box::new(device),
+            },
+            response: Vec::new(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(busy.cancel().err());
+        });
+        // The prompt arrives at once, so this is the flush's FLUSH_TIMEOUT,
+        // not the prompt wait's CANCEL_TIMEOUT.
+        match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(Some(FleaTerminalError::Timeout { timeout })) => {
+                assert_eq!(timeout, FLUSH_TIMEOUT);
+            }
+            Ok(other) => panic!("expected Timeout error, got {other:?}"),
+            Err(_) => panic!("cancel() did not return within 15s on a chatty device"),
+        }
     }
 }
