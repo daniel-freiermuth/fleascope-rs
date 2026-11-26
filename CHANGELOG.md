@@ -34,6 +34,8 @@ Supports firmware `>= 4.0.0, < 5.0.0`.
   above 139 808 µs are rejected with `CaptureConfigError::InvalidSamplePeriod`.
 - A failed `reset` write during a connect retry is logged at warn level
   instead of being discarded.
+- `CaptureConfigError::TimeFrameTooSmall` now names the real minimum time
+  frame, 112 µs. It said 111 µs, but a 111 µs read was always rejected.
 
 ## [1.1.0] — 2026-11-23
 
