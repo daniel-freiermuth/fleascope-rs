@@ -203,12 +203,13 @@ impl AnalogTriggerBuilder {
     }
 
     pub fn into_trigger(self, flea_probe: &FleaProbe) -> Result<AnalogTrigger, CaptureConfigError> {
-        let raw_level = (flea_probe.voltage_to_raw(self.volts)? / 4.0 + 0.5) as i16;
+        let raw_level = (flea_probe.voltage_to_raw(self.volts)? / 4.0 + 0.5).trunc();
 
-        if !(-1023..=1023).contains(&raw_level) {
+        // Range-check the float before casting: `as i16` maps NaN to 0, which would pass.
+        if !(-1023.0..=1023.0).contains(&raw_level) {
             return Err(CaptureConfigError::VoltageOutOfRange);
         }
-        Ok(AnalogTrigger::new(raw_level, self.behavior))
+        Ok(AnalogTrigger::new(raw_level as i16, self.behavior))
     }
 }
 
@@ -258,5 +259,16 @@ mod tests {
             .set_bit(9, BitState::High)
             .unwrap_err();
         assert_eq!(err, BitIndexOutOfRange { bit: 9 });
+    }
+
+    #[test]
+    fn analog_trigger_rejects_nan_voltage() {
+        let mut probe = FleaProbe::new(crate::flea_scope::ProbeType::X1);
+        probe.set_calibration(2048.0, 1000.0);
+
+        let result = AnalogTrigger::start_capturing_when(f64::NAN)
+            .level()
+            .into_trigger(&probe);
+        assert!(matches!(result, Err(CaptureConfigError::VoltageOutOfRange)));
     }
 }
