@@ -50,7 +50,7 @@ pub enum CaptureConfigError {
     #[error("Time frame too large (max 3.49 seconds)")]
     TimeFrameTooLarge,
 
-    #[error("Time frame too small (min 111 microseconds)")]
+    #[error("Time frame too small (min 112 microseconds)")]
     TimeFrameTooSmall,
 
     #[error("Delay too large (max 1 second)")]
@@ -417,7 +417,7 @@ impl IdleFleaScope {
         if time_frame.as_secs_f64() > 3.49 {
             return Err(CaptureConfigError::TimeFrameTooLarge);
         }
-        if time_frame.as_secs() == 0 && time_frame.as_micros() < 111 {
+        if time_frame.as_secs() == 0 && time_frame.as_micros() < 112 {
             return Err(CaptureConfigError::TimeFrameTooSmall);
         }
 
@@ -908,6 +908,28 @@ mod tests {
     fn test_number1_to_prescaler() {
         assert!(IdleFleaScope::number1_to_prescaler(100).is_ok());
         assert!(IdleFleaScope::number1_to_prescaler(0).is_err());
+    }
+
+    #[test]
+    fn test_prepare_read_command_accepts_advertised_min_time_frame() {
+        let read = |micros| {
+            let trigger = DigitalTrigger::start_capturing_when()
+                .is_matching()
+                .into_trigger_fields();
+            IdleFleaScope::prepare_read_command(Duration::from_micros(micros), trigger, None)
+        };
+        // The error message is what callers see; the minimum it names must be accepted.
+        let message = CaptureConfigError::TimeFrameTooSmall.to_string();
+        let min: u64 = message
+            .split(|c: char| !c.is_ascii_digit())
+            .find(|s| !s.is_empty())
+            .and_then(|s| s.parse().ok())
+            .expect("message names a minimum");
+        assert!(read(min).is_ok(), "{min}us rejected: {:?}", read(min));
+        assert!(matches!(
+            read(min - 1),
+            Err(CaptureConfigError::TimeFrameTooSmall)
+        ));
     }
 
     /// `stream 2333 4 16` sends the sum of 4 readings shifted left by 2
