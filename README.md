@@ -19,10 +19,10 @@ use std::time::Duration;
 
 // Connect and acquire data
 let (mut scope, mut x1, x10) = IdleFleaScope::connect(None, None)?;
-x1.set_calibration(saved_zero, saved_3v3); // calibration the host stored
+x1.set_calibration(2048.0, 1000.0); // zero / 3.3 V offsets the host stored
 let trigger_config = DigitalTrigger::start_capturing_when()
                         .is_matching()
-                        .into_trigger_fields()?;
+                        .into_trigger_fields();
 let reading = scope.read_sync(Duration::from_millis(10), trigger_config, None)?;
 let volts: Vec<f64> = x1.voltages(reading.raw_bnc())?.collect();
 println!("Captured {} samples", reading.len());
