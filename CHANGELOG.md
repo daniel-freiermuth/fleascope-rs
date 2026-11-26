@@ -35,6 +35,15 @@ Supports firmware `>= 4.0.0, < 5.0.0`.
 - A failed `reset` write during a connect retry is logged at warn level
   instead of being discarded.
 
+### Fixed
+- `IdleFleaTerminal::flash_upgrade` reports a record the device rejects
+  (bad checksum, record, count or type) as `FlashUpgradeError::UpgradeFailed`
+  with the device's output instead of `Terminal(Io(TimedOut))`: the device
+  stops reading records after rejecting one, so the next write stalled and its
+  timeout was returned. Blank lines after the end-of-file record no longer
+  turn a flash that is proceeding into a write timeout either; records after
+  it are still an error, since the device ignores them.
+
 ## [1.1.0] — 2026-11-23
 
 Supports firmware `>= 3.0.0, < 4.0.0`; digital stream needs `>= 3.1.0`.

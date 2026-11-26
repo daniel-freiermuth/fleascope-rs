@@ -10,6 +10,9 @@ const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 const UPGRADE_START_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long [`IdleFleaTerminal::flash_upgrade`] waits for the device to finish after the last record.
 const UPGRADE_FINISH_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long [`IdleFleaTerminal::flash_upgrade`] looks for the device's verdict
+/// after a record write stalls.
+const UPGRADE_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 const UPGRADE_READY: &[u8] = b"paste HEX upgrade file now";
 const UPGRADE_DONE: &[u8] = b"paste done!";
 const UPGRADE_FAILED: &[u8] = b"upgrade failed";
@@ -346,7 +349,8 @@ impl IdleFleaTerminal {
     /// Steps:
     /// 1. Sends the `upgrade` command.
     /// 2. Waits for the device to prompt for HEX input.
-    /// 3. Streams every record line to the device.
+    /// 3. Streams every record line to the device. If a write times out, the
+    ///    device has stopped reading records; its verdict decides the result.
     /// 4. Waits for `"paste done!"` (success) or `"upgrade failed"` (failure).
     ///
     /// `on_progress` is called after each record line is sent with current progress.
@@ -382,13 +386,28 @@ impl IdleFleaTerminal {
             Err(e) => return Err(e.into()),
         }
 
-        // 3. Stream every HEX record.
+        // 3. Stream every HEX record. The device stops reading once it rejects
+        //    a record or takes the end-of-file record, so a write then stalls
+        //    and times out; its verdict is already on the way. It ignores
+        //    whatever follows the end-of-file record, so `paste done!` only
+        //    means success if every line after that record is blank.
         let mut record = String::new();
         for (i, line) in hex_lines.iter().enumerate() {
             record.clear();
             record.push_str(line);
             record.push('\n');
-            self.inner.write_raw(record.as_bytes())?;
+            if let Err(e) = self.inner.write_raw(record.as_bytes()) {
+                if let FleaTerminalError::Io(io) = &e
+                    && io.kind() == ErrorKind::TimedOut
+                    && let Ok((output, matched)) = self
+                        .inner
+                        .read_until_pattern(&[UPGRADE_DONE, UPGRADE_FAILED], UPGRADE_STALL_TIMEOUT)
+                    && (matched == 1 || only_blank_lines_after_eof(hex_lines))
+                {
+                    return upgrade_outcome(&output, matched);
+                }
+                return Err(e.into());
+            }
             on_progress(FlashProgress { sent: i + 1, total });
         }
 
@@ -397,14 +416,43 @@ impl IdleFleaTerminal {
         let (output, matched) = self
             .inner
             .read_until_pattern(&[UPGRADE_DONE, UPGRADE_FAILED], UPGRADE_FINISH_TIMEOUT)?;
-        if matched == 1 {
-            return Err(FlashUpgradeError::UpgradeFailed(
-                String::from_utf8_lossy(&output).into_owned(),
-            ));
-        }
-
-        Ok(())
+        upgrade_outcome(&output, matched)
     }
+}
+
+/// Map what [`IdleFleaTerminal::flash_upgrade`] read, and the index of the
+/// matched pattern in `[UPGRADE_DONE, UPGRADE_FAILED]`, to its result.
+fn upgrade_outcome(output: &[u8], matched: usize) -> Result<(), FlashUpgradeError> {
+    if matched == 1 {
+        return Err(FlashUpgradeError::UpgradeFailed(
+            String::from_utf8_lossy(output).into_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `line` is an Intel HEX end-of-file record (count `00`, type `01`),
+/// after which the firmware stops reading (fleascope-fw sources/flash.c).
+fn is_eof_record(line: &str) -> bool {
+    let record = line.trim_ascii_start().as_bytes();
+    record.first() == Some(&b':')
+        && record.get(1..3) == Some(b"00")
+        && record.get(7..9) == Some(b"01")
+}
+
+/// Whether `hex_lines` has an end-of-file record and only blank lines after
+/// the first one. The firmware ignores whatever follows that record, so
+/// anything else there was never flashed.
+fn only_blank_lines_after_eof(hex_lines: &[&str]) -> bool {
+    hex_lines
+        .iter()
+        .position(|l| is_eof_record(l))
+        .is_some_and(|eof| {
+            hex_lines
+                .iter()
+                .skip(eof + 1)
+                .all(|l| l.trim_ascii().is_empty())
+        })
 }
 impl TryFrom<StatelessFleaTerminal> for IdleFleaTerminal {
     type Error = (StatelessFleaTerminal, FleaTerminalError);
@@ -1410,5 +1458,75 @@ pub(crate) mod tests {
             .exec_sync("hostname", Some(Duration::from_secs(1)))
             .expect("hostname after a failed upgrade");
         assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    #[test]
+    fn flash_upgrade_reports_device_failure_when_records_stall_after_it() {
+        // The firmware stops taking records once it rejects one: it prints
+        // `upgrade failed` and erases its code flash before it reads the
+        // terminal again (fleascope-fw sources/flash.c, code_new()), so the
+        // next record write times out. The budget lets everything up to
+        // `:BAD` through, then one write stalls.
+        let budget = ["upgrade\n", ":10000000DEADBEEF\n", ":BAD\n"]
+            .concat()
+            .len();
+        let mut idle = idle_fake_device(FakeDevice::new(0, Some(budget), 1));
+        let records = [
+            ":10000000DEADBEEF",
+            ":BAD",
+            ":10001000CAFEBABE",
+            ":10002000CAFEBABE",
+            ":00000001FF",
+        ];
+        match idle.flash_upgrade(&records, |_| {}) {
+            Err(FlashUpgradeError::UpgradeFailed(output)) => {
+                assert!(output.contains("upgrade failed"), "output: {output:?}");
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+            Ok(()) => panic!("flash_upgrade() succeeded despite `upgrade failed`"),
+        }
+        let hostname = idle
+            .exec_sync("hostname", Some(Duration::from_secs(1)))
+            .expect("hostname after a failed upgrade");
+        assert_eq!(String::from_utf8_lossy(&hostname), "smoke");
+    }
+
+    #[test]
+    fn flash_upgrade_succeeds_when_lines_after_eof_stall() {
+        // After the end-of-file record the firmware programs the flash and
+        // resets; it never reads another line, so trailing lines stall.
+        let budget = ["upgrade\n", ":10000000DEADBEEF\n", ":00000001FF\n"]
+            .concat()
+            .len();
+        let mut idle = idle_fake_device(FakeDevice::new(0, Some(budget), 1));
+        idle.flash_upgrade(&[":10000000DEADBEEF", ":00000001FF", "", ""], |_| {})
+            .expect("flash_upgrade");
+    }
+
+    #[test]
+    fn flash_upgrade_errors_when_records_after_eof_stall() {
+        // The firmware commits at the first end-of-file record and ignores
+        // the rest, so records after it never reach the flash: the device
+        // programs a truncated image, which must not be reported as success.
+        // Lines written before the stalled one may only be queued on the
+        // host (cdc-acm write buffers), so where the write stalls says
+        // nothing about which records the device took.
+        let records = [":020000040000FA", ":00000001FF", ":04000000CAFEBABEBC", ""];
+        for accepted in 2..records.len() {
+            let budget = std::iter::once("upgrade")
+                .chain(records[..accepted].iter().copied())
+                .map(|l| l.len() + 1)
+                .sum();
+            let mut idle = idle_fake_device(FakeDevice::new(0, Some(budget), 1));
+            match idle.flash_upgrade(&records, |_| {}) {
+                Err(FlashUpgradeError::Terminal(FleaTerminalError::Io(e))) => {
+                    assert_eq!(e.kind(), ErrorKind::TimedOut);
+                }
+                Err(e) => panic!("{accepted} lines accepted: unexpected error: {e}"),
+                Ok(()) => panic!(
+                    "{accepted} lines accepted: flash_upgrade() succeeded with records after EOF"
+                ),
+            }
+        }
     }
 }
