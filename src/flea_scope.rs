@@ -373,11 +373,21 @@ impl IdleFleaScope {
     }
 
     /// Set the waveform generator
+    ///
+    /// Returns [`FleaTerminalError::UnexpectedResponse`] if the firmware prints
+    /// anything in reply, e.g. `bad frequency` for `hz` outside `0..=10_000_000`;
+    /// the previous waveform then keeps running.
     pub fn set_waveform(&mut self, waveform: Waveform, hz: i32) -> Result<(), FleaTerminalError> {
-        self.serial.exec_sync(
-            &format!("wave {} {}", waveform.as_str(), hz),
-            Some(COMMAND_TIMEOUT),
-        )?;
+        let command = format!("wave {} {}", waveform.as_str(), hz);
+        let reply = self.serial.exec_sync(&command, Some(COMMAND_TIMEOUT))?;
+        let reply = String::from_utf8_lossy(&reply);
+        let reply = reply.trim();
+        if !reply.is_empty() {
+            return Err(FleaTerminalError::UnexpectedResponse {
+                command: command.into(),
+                response: reply.into(),
+            });
+        }
         Ok(())
     }
 
@@ -1181,6 +1191,27 @@ mod tests {
             connect_with_version("garbage"),
             Err(FleaConnectorError::FirmwareVersionUnparseable { raw }) if raw == "garbage"
         ));
+    }
+
+    #[test]
+    fn set_waveform_reports_rejected_frequency() {
+        let mut scope = connect_with_version("4.0.0 (checksum 0x1a2b)").expect("4.0.0 accepted");
+        scope
+            .set_waveform(Waveform::Sine, 0)
+            .expect("0 Hz accepted");
+        scope
+            .set_waveform(Waveform::Sine, 10_000_000)
+            .expect("10 MHz accepted");
+        for hz in [-1, 10_000_001] {
+            assert!(
+                matches!(
+                    scope.set_waveform(Waveform::Sine, hz),
+                    Err(FleaTerminalError::UnexpectedResponse { ref response, .. })
+                        if &**response == "bad frequency"
+                ),
+                "{hz}"
+            );
+        }
     }
 
     #[test]

@@ -1047,6 +1047,18 @@ pub(crate) mod tests {
                             b":00000001FF" => b"paste done!\r\n",
                             b":BAD" => b"upgrade failed\r\n> ",
                             l if l.starts_with(b":") => b"",
+                            l if l.starts_with(b"wave ") => {
+                                // fleascope-fw run2.c, code_wave: rejects
+                                // n < 0 || n > 10000000 with "bad frequency".
+                                let hz = std::str::from_utf8(l)
+                                    .ok()
+                                    .and_then(|s| s.rsplit(' ').next())
+                                    .and_then(|s| s.parse::<i64>().ok());
+                                match hz {
+                                    Some(n) if (0..=10_000_000).contains(&n) => b"> ",
+                                    _ => b"bad frequency\r\n> ",
+                                }
+                            }
                             _ => b"> ",
                         };
                         replies.extend(reply);
